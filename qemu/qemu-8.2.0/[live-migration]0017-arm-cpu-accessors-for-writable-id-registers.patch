@@ -1,0 +1,48 @@
+From 89000d2ef0ec9b1e0dad1f9f548fbcff958c4360 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:46:14 +0800
+Subject: [PATCH 17/28] arm/cpu: accessors for writable id registers
+
+---
+ target/arm/cpu.h | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index a56b6ab699..e348985f32 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -865,6 +865,13 @@ typedef struct IdRegMap {
+     uint64_t regs[NR_ID_REGS];
+ } IdRegMap;
+ 
++#define ARM_FEATURE_ID_RANGE_IDX(op0, op1, crn, crm, op2)               \
++    ({                                                              \
++        __u64 __op1 = (op1) & 3;                                \
++        __op1 -= (__op1 == 3);                                  \
++        (__op1 << 6 | ((crm) & 7) << 3 | (op2));                \
++    })
++
+ /* REG is ID_XXX */
+ #define FIELD_DP64_IDREG(ISAR, REG, FIELD, VALUE)                       \
+     ({                                                                  \
+@@ -912,6 +919,17 @@ typedef struct IdRegMap {
+         i_->idregs[REG ## _EL1_IDX];                                    \
+     })
+ 
++#define GET_IDREG_WRITABLE(MAP, REG)                                  \
++    ({                                                                \
++    const IdRegMap *m_ = (MAP);                                       \
++    int index = ARM_FEATURE_ID_RANGE_IDX((sysreg >> 14) & 0x0000c000, \
++                                         (sysreg >> 11) & 0x00003800, \
++                                         (sysreg >> 7) & 0x00000780,  \
++                                         (sysreg >> 3) & 0x00000078,  \
++                                         sysreg & 0x00000007);        \
++    m_->regs[index];                                                  \
++    })
++
+ /**
+  * ARMCPU:
+  * @env: #CPUARMState
+-- 
+2.43.0
+

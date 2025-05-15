@@ -1,0 +1,254 @@
+From 3aeedf189b44b800c9d90df3fa1af4756cb258eb Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:47:26 +0800
+Subject: [PATCH 18/28] arm/kvm: Allow reading all the writable ID registers
+
+---
+ target/arm/cpu-sysregs.h |  2 ++
+ target/arm/cpu.h         |  3 ++
+ target/arm/cpu64.c       |  2 +-
+ target/arm/kvm.c         |  5 +--
+ target/arm/kvm64.c       | 75 ++++++++++++++++++++++++++++++++++++++--
+ target/arm/kvm_arm.h     | 13 +++++--
+ target/arm/trace-events  |  2 ++
+ 7 files changed, 94 insertions(+), 8 deletions(-)
+
+diff --git a/target/arm/cpu-sysregs.h b/target/arm/cpu-sysregs.h
+index e47ee0099a..10fc5bb327 100644
+--- a/target/arm/cpu-sysregs.h
++++ b/target/arm/cpu-sysregs.h
+@@ -41,6 +41,8 @@ int get_sysreg_idx(ARMSysRegs sysreg);
+ 
+ #ifdef CONFIG_KVM
+ uint64_t idregs_sysreg_to_kvm_reg(ARMSysRegs sysreg);
++int kvm_idx_to_idregs_idx(int kidx);
++int idregs_idx_to_kvm_idx(ARMIDRegisterIdx idx);
+ #endif
+ 
+ #endif /* ARM_CPU_SYSREGS_H */
+\ No newline at end of file
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index e348985f32..d7f0c5a369 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1075,6 +1075,9 @@ struct ArchCPU {
+      */
+     ARMIdRegsState writable_id_regs;
+ 
++    /* ID reg writable bitmask (KVM only) */
++    IdRegMap *writable_map;
++
+     /* Specify the number of cores in this CPU cluster. Used for the L2CTLR
+      * register.
+      */
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 7765b567e1..70f95f1ef4 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -801,7 +801,7 @@ static void aarch64_host_initfn(Object *obj)
+ {
+ #if defined(CONFIG_KVM)
+     ARMCPU *cpu = ARM_CPU(obj);
+-    kvm_arm_set_cpu_features_from_host(cpu);
++    kvm_arm_set_cpu_features_from_host(cpu, false);
+     if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
+         aarch64_add_sve_properties(obj);
+         aarch64_add_pauth_properties(obj);
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 35b86f9d93..7762c6c216 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -35,6 +35,7 @@
+ #include "hw/irq.h"
+ #include "qapi/visitor.h"
+ #include "qemu/log.h"
++#include "cpu-custom.h"
+ 
+ const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
+     KVM_CAP_LAST_INFO
+@@ -171,13 +172,13 @@ void kvm_arm_destroy_scratch_host_vcpu(int *fdarray)
+     }
+ }
+ 
+-void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu)
++void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu, bool exhaustive)
+ {
+     CPUARMState *env = &cpu->env;
+ 
+     if (!arm_host_cpu_features.dtb_compatible) {
+         if (!kvm_enabled() ||
+-            !kvm_arm_get_host_cpu_features(&arm_host_cpu_features)) {
++            !kvm_arm_get_host_cpu_features(cpu, &arm_host_cpu_features, exhaustive)) {
+             /* We can't report this error yet, so flag that we need to
+              * in arm_cpu_realizefn().
+              */
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index 79c95c4a15..099045c2be 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -28,10 +28,12 @@
+ #include "sysemu/kvm.h"
+ #include "sysemu/kvm_int.h"
+ #include "kvm_arm.h"
++#include "trace.h"
+ #include "internals.h"
+ #include "cpu-features.h"
+ #include "hw/acpi/acpi.h"
+ #include "hw/acpi/ghes.h"
++#include "cpu-custom.h"
+ 
+ static bool have_guest_debug;
+ 
+@@ -273,7 +275,72 @@ static int get_host_cpu_reg(int fd, ARMHostCPUFeatures *ahcf, ARMIDRegisterIdx i
+     return ret;
+ }
+ 
+-bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
++int kvm_idx_to_idregs_idx(int kidx)
++{
++    int op1, crm, op2;
++    ARMSysRegs sysreg;
++
++    op1 = kidx / 64;
++    if (op1 == 2) {
++        op1 = 3;
++    }
++    crm = (kidx % 64) / 8;
++    op2 = kidx % 8;
++    sysreg = ENCODE_ID_REG(3, op1, 0, crm, op2);
++    return get_sysreg_idx(sysreg);
++}
++
++int idregs_idx_to_kvm_idx(ARMIDRegisterIdx idx)
++{
++    ARMSysRegs sysreg = id_register_sysreg[idx];
++
++    return KVM_ARM_FEATURE_ID_RANGE_IDX((sysreg & CP_REG_ARM64_SYSREG_OP0_MASK) >> CP_REG_ARM64_SYSREG_OP0_SHIFT,
++                                        (sysreg & CP_REG_ARM64_SYSREG_OP1_MASK) >> CP_REG_ARM64_SYSREG_OP1_SHIFT,
++                                        (sysreg & CP_REG_ARM64_SYSREG_CRN_MASK) >> CP_REG_ARM64_SYSREG_CRN_SHIFT,
++                                        (sysreg & CP_REG_ARM64_SYSREG_CRM_MASK) >> CP_REG_ARM64_SYSREG_CRM_SHIFT,
++                                        (sysreg & CP_REG_ARM64_SYSREG_OP2_MASK) >> CP_REG_ARM64_SYSREG_OP2_SHIFT);
++}
++
++
++/*
++ * get_host_cpu_idregs: Read all the writable ID reg host values
++ *
++ * Need to be called once the writable mask has been populated
++ * Note we may want to read all the known id regs but some of them are not
++ * writable and return an error, hence the choice of reading only those which
++ * are writable. Those are also readable!
++ */
++static int get_host_cpu_idregs(ARMCPU *cpu, int fd, ARMHostCPUFeatures *ahcf)
++{
++    int err = 0;
++    int i;
++
++    for (i = 0; i < NUM_ID_IDX; i++) {
++        ARM64SysReg *sysregdesc = &arm64_id_regs[i];
++        ARMSysRegs sysreg = sysregdesc->sysreg;
++        uint64_t writable_mask = cpu->writable_map->regs[idregs_idx_to_kvm_idx(i)];
++        uint64_t *reg;
++        int ret;
++
++        if (!writable_mask) {
++            continue;
++        }
++
++        reg = &ahcf->isar.idregs[i];
++        ret = read_sys_reg64(fd, reg, idregs_sysreg_to_kvm_reg(sysreg));
++        trace_get_host_cpu_idregs(sysregdesc->name, *reg);
++        if (ret) {
++            error_report("%s error reading value of host %s register (%m)",
++                         __func__, sysregdesc->name);
++
++            err = ret;
++        }
++    }
++    return err;
++}
++
++bool kvm_arm_get_host_cpu_features(ARMCPU *cpu, ARMHostCPUFeatures *ahcf,
++                                   bool exhaustive)
+ {
+     /* Identify the feature bits corresponding to the host CPU, and
+      * fill out the ARMHostCPUClass fields accordingly. To do this
+@@ -365,7 +432,7 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
+         err |= get_host_cpu_reg(fd, ahcf, ID_AA64MMFR0_EL1_IDX);
+         err |= get_host_cpu_reg(fd, ahcf, ID_AA64MMFR1_EL1_IDX);
+         err |= get_host_cpu_reg(fd, ahcf, ID_AA64MMFR2_EL1_IDX);
+-        
++
+ 
+         /*
+          * Note that if AArch32 support is not present in the host,
+@@ -400,6 +467,10 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
+         err |= get_host_cpu_reg(fd, ahcf, ID_DFR1_EL1_IDX);
+         err |= get_host_cpu_reg(fd, ahcf, ID_MMFR5_EL1_IDX);
+ 
++        /* Make sure writable ID reg values are read */
++        if (exhaustive) {
++            err |= get_host_cpu_idregs(cpu, fd, ahcf);
++        }
+         /*
+          * DBGDIDR is a bit complicated because the kernel doesn't
+          * provide an accessor for it in 64-bit mode, which is what this
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index ed4b75f613..08893c36c1 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -250,14 +250,18 @@ typedef struct ARMHostCPUFeatures {
+ 
+ /**
+  * kvm_arm_get_host_cpu_features:
++ * @cpu: cpu object
+  * @ahcf: ARMHostCPUClass to fill in
+  *
+  * Probe the capabilities of the host kernel's preferred CPU and fill
+  * in the ARMHostCPUClass struct accordingly.
++ * @exhaustive: if true, all the feature ID regs are queried instead of
++ *              a subset
+  *
+  * Returns true on success and false otherwise.
+  */
+-bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf);
++bool kvm_arm_get_host_cpu_features(ARMCPU *cpu, ARMHostCPUFeatures *ahcf,
++                                   bool exhaustive);
+ 
+ /**
+  * kvm_arm_sve_get_vls:
+@@ -275,8 +279,10 @@ uint32_t kvm_arm_sve_get_vls(CPUState *cs);
+  *
+  * Set up the ARMCPU struct fields up to match the information probed
+  * from the host CPU.
++ * @exhaustive: if true, all the feature ID regs are queried instead of
++ *              a subset
+  */
+-void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu);
++void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu, bool exhaustive);
+ 
+ /**
+  * kvm_arm_add_vcpu_properties:
+@@ -444,7 +450,8 @@ static inline int kvm_arm_get_writable_id_regs(ARMCPU *cpu, IdRegMap *idregmap)
+ /*
+  * These functions should never actually be called without KVM support.
+  */
+-static inline void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu)
++static inline void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu,
++                                                      bool exhaustive)
+ {
+     g_assert_not_reached();
+ }
+diff --git a/target/arm/trace-events b/target/arm/trace-events
+index 48cc0512db..bde0bc9d38 100644
+--- a/target/arm/trace-events
++++ b/target/arm/trace-events
+@@ -12,3 +12,5 @@ arm_gt_update_irq(int timer, int irqstate) "gt_update_irq: timer %d irqstate %d"
+ 
+ # kvm.c
+ kvm_arm_fixup_msi_route(uint64_t iova, uint64_t gpa) "MSI iova = 0x%"PRIx64" is translated into 0x%"PRIx64
++# kvm64.c
++get_host_cpu_idregs(const char *name, uint64_t value) "scratch vcpu host value for %s is 0x%"PRIx64
+-- 
+2.43.0
+
