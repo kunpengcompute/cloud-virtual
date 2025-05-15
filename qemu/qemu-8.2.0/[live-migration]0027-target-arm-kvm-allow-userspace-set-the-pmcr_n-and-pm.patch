@@ -1,0 +1,502 @@
+From 383ef5b120d4e9e160db94d82e09b054fe584432 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:54:44 +0800
+Subject: [PATCH 27/28] target/arm/kvm:allow userspace set the pmcr_n and
+ pmu_event_filter
+
+---
+ hw/arm/virt.c                 | 134 ++++++++++++++++++++++++++++++++++
+ include/hw/arm/virt.h         |  19 +++++
+ linux-headers/asm-arm64/kvm.h |   3 +
+ qapi/common.json              |  43 +++++++++++
+ qemu-options.hx               |  16 +++-
+ target/arm/cpu.c              |   6 ++
+ target/arm/cpu.h              |   2 +
+ target/arm/kvm64.c            |  58 +++++++++++++++
+ target/arm/kvm_arm.h          |   6 ++
+ 9 files changed, 286 insertions(+), 1 deletion(-)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index f05fa08a19..426d80f390 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -87,6 +87,7 @@
+ #include "hw/char/pl011.h"
+ #include "qemu/guest-random.h"
+ #include "qapi/qmp/qdict.h"
++#include "qapi/qmp/qnum.h"
+ 
+ #define DEFINE_VIRT_MACHINE_LATEST(major, minor, latest) \
+     static void virt_##major##_##minor##_class_init(ObjectClass *oc, \
+@@ -2310,6 +2311,7 @@ static void virt_cpu_post_init(VirtMachineState *vms, MemoryRegion *sysmem)
+                 if (kvm_irqchip_in_kernel()) {
+                     kvm_arm_pmu_set_irq(cpu, VIRTUAL_PMU_IRQ);
+                 }
++                kvm_arm_pmu_set_event_filter(cpu);
+                 kvm_arm_pmu_init(cpu);
+             }
+             if (steal_time) {
+@@ -2879,6 +2881,73 @@ static void machvirt_init(MachineState *machine)
+     qemu_add_machine_init_done_notifier(&vms->machine_done);
+ }
+ 
++static void event_info_init(VirtMachineState *vms)
++{
++    for (int i = 0; i < ARM_PMU_PMCEID_NUM; i++) {
++        vms->event_info.bmap[i] = 0UL;
++    }
++
++    for (int i = 0; i < ARM_PMU_EVENT_MAX_NUM; i++) {
++        vms->event_info.events[i] = PMU_EVENT_TYPE_MAX;
++    }
++}
++
++static uint32_t get_event_type_id(PmuEvent event)
++{
++    if (event < PMU_EVENT_SAMPLE_POP) {
++        return event;
++    }
++
++    switch (event)
++    {
++    case PMU_EVENT_L2D_CACHE_LMISS_RD:
++    case PMU_EVENT_L2I_CACHE_LMISS:
++    case PMU_EVENT_L3D_CACHE_LMISS_RD:
++    case PMU_EVENT_TRB_WRAP:
++        return event - PMU_EVENT_L2D_CACHE_LMISS_RD + ARMV8_PMUV3_PERFCTR_L2D_CACHE_LMISS_RD;
++    case PMU_EVENT_TRB_TRIG:
++        return ARMV8_PMUV3_PERFCTR_TRB_TRIG;
++    case PMU_EVENT_TRCEXTOUT0:
++    case PMU_EVENT_TRCEXTOUT1:
++    case PMU_EVENT_TRCEXTOUT2:
++    case PMU_EVENT_TRCEXTOUT3:
++        return event - PMU_EVENT_TRCEXTOUT0 + ARMV8_PMUV3_PERFCTR_TRCEXTOUT0;
++    case PMU_EVENT_CTI_TRIGOUT4:
++    case PMU_EVENT_CTI_TRIGOUT5:
++    case PMU_EVENT_CTI_TRIGOUT6:
++    case PMU_EVENT_CTI_TRIGOUT7:
++        return event - PMU_EVENT_CTI_TRIGOUT4 + ARMV8_PMUV3_PERFCTR_CTI_TRIGOUT4;
++    case PMU_EVENT_LDST_ALIGN_LAT:
++    case PMU_EVENT_LD_ALIGN_LAT:
++    case PMU_EVENT_ST_ALIGN_LAT:
++        return event - PMU_EVENT_LDST_ALIGN_LAT + ARMV8_PMUV3_PERFCTR_LDST_ALIGN_LAT;
++    case PMU_EVENT_MEM_ACCESS_CHECKED:
++    case PMU_EVENT_MEM_ACCESS_CHECKED_RD:
++    case PMU_EVENT_MEM_ACCESS_CHECKED_WR:
++        return event - PMU_EVENT_MEM_ACCESS_CHECKED + ARMV8_MTE_PERFCTR_MEM_ACCESS_CHECKED;
++    default:
++        return event - PMU_EVENT_SAMPLE_POP + ARMV8_SPE_PERFCTR_SAMPLE_POP;
++    }
++}
++
++void parse_denied_events(VirtMachineState *vms, const PmuEventList *events,
++                        Error **errp)
++{
++    const PmuEventList *node;
++    int i = 0;
++    for (node = events; node; node = node->next) {
++        vms->event_info.events[i] = node->value;
++        uint32_t type_id = get_event_type_id(node->value);
++
++        if (type_id < ARMV8_SPE_PERFCTR_SAMPLE_POP) {
++            vms->event_info.bmap[0] |= (1UL << type_id);
++        }else {
++            vms->event_info.bmap[1] |= (1UL << (type_id - ARMV8_SPE_PERFCTR_SAMPLE_POP));
++        }
++        i++;
++    }
++}
++
+ static bool virt_get_secure(Object *obj, Error **errp)
+ {
+     VirtMachineState *vms = VIRT_MACHINE(obj);
+@@ -3197,6 +3266,60 @@ static void virt_set_gic_version(Object *obj, const char *value, Error **errp)
+     }
+ }
+ 
++static char *virt_get_pmcr_n(Object *obj, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    QNum *qn;
++    qn = qnum_from_int(vms->pmcr_n);
++    const char *val = qnum_to_string(qn);
++    return g_strdup(val);
++}
++
++static void virt_set_pmcr_n(Object *obj, const char *value, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    int result, err;
++    err = qemu_strtoi(value, NULL, 10, &result);
++    if (err < 0 || result < 0 || result > 31) {
++        error_setg(errp, "Invalid pmcr_n value");
++        error_append_hint(errp, "Valid value is a integer, between 1 and 31.\n");
++        return;
++    }
++    vms->pmcr_n = result;
++}
++
++static void virt_get_event_type(Object *obj, Visitor *v, const char *name,
++                                void *opaque, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    PmuEvent *events = vms->event_info.events;
++    PmuEventList *head = NULL;
++    PmuEventList **tail = &head;
++
++    for (int i = 0;i < ARM_PMU_EVENT_MAX_NUM && events[i] != PMU_EVENT_TYPE_MAX; i++) {
++        PmuEvent node = events[i];
++        QAPI_LIST_APPEND(tail, node);
++    }
++
++    visit_type_PmuEventList(v, name, &head, errp);
++    qapi_free_PmuEventList(head);
++}
++
++static void virt_set_event_type(Object *obj, Visitor *v, const char *name,
++                                void *opaque, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    PmuEventList *events;
++
++    if (!visit_type_PmuEventList(v, name, &events, errp)) {
++        return;
++    }
++
++    event_info_init(vms);
++    parse_denied_events(vms, events, errp);
++    qapi_free_PmuEventList(events);
++}
++
+ static char *virt_get_iommu(Object *obj, Error **errp)
+ {
+     VirtMachineState *vms = VIRT_MACHINE(obj);
+@@ -4077,6 +4200,17 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
+                                           "Describe target cpu impl in the format midr1:revidr1-midr2:revidr2"
+                                           "Maximum 4 midr:revidr pair is supported");
+ 
++    object_class_property_add_str(oc, "pmcr-n", virt_get_pmcr_n,
++                                  virt_set_pmcr_n);
++    object_class_property_set_description(oc, "pmcr-n",
++                                          "Set the number of PMU counter. "
++                                          "Valid value is a integer, between 1 and 31.");
++
++    object_class_property_add(oc, "denied-events-type", "PmuEventWrapper",
++                              virt_get_event_type, virt_set_event_type,
++                              NULL, NULL);
++    object_class_property_set_description(oc, "denied-events-type",
++                                          "closed PMU event list");
+ }
+ 
+ static char *virt_get_kvm_type(Object *obj, Error **errp G_GNUC_UNUSED)
+diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
+index 3e2759d225..481534446a 100644
+--- a/include/hw/arm/virt.h
++++ b/include/hw/arm/virt.h
+@@ -44,6 +44,16 @@
+ #define NUM_VIRTIO_TRANSPORTS 32
+ #define NUM_SMMU_IRQS          4
+ 
++#define ARM_PMU_EVENT_MAX_NUM 128
++#define ARM_PMU_PMCEID_NUM 2
++#define ARMV8_SPE_PERFCTR_SAMPLE_POP           0x4000
++#define ARMV8_PMUV3_PERFCTR_L2D_CACHE_LMISS_RD 0x4009
++#define ARMV8_PMUV3_PERFCTR_TRB_TRIG           0x400E
++#define ARMV8_PMUV3_PERFCTR_TRCEXTOUT0         0x4010
++#define ARMV8_PMUV3_PERFCTR_CTI_TRIGOUT4       0x4018
++#define ARMV8_PMUV3_PERFCTR_LDST_ALIGN_LAT     0x4020
++#define ARMV8_MTE_PERFCTR_MEM_ACCESS_CHECKED   0x4024
++
+ /* See Linux kernel arch/arm64/include/asm/pvclock-abi.h */
+ #define PVTIME_SIZE_PER_CPU 64
+ 
+@@ -183,6 +193,11 @@ typedef enum VirtGICType {
+ #define VIRT_GIC_VERSION_3_MASK BIT(VIRT_GIC_VERSION_3)
+ #define VIRT_GIC_VERSION_4_MASK BIT(VIRT_GIC_VERSION_4)
+ 
++typedef struct PmuEventInfo {
++    uint64_t bmap[ARM_PMU_PMCEID_NUM];
++    PmuEvent events[ARM_PMU_EVENT_MAX_NUM];
++}PmuEventInfo;
++
+ struct VirtMachineClass {
+     MachineClass parent;
+     bool disallow_affinity_adjustment;
+@@ -254,6 +269,8 @@ struct VirtMachineState {
+     char *oem_table_id;
+     char *kvm_type;
+     NotifierList cpuhp_notifiers;
++    int pmcr_n;
++    PmuEventInfo event_info;
+ };
+ 
+ #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
+@@ -264,6 +281,8 @@ OBJECT_DECLARE_TYPE(VirtMachineState, VirtMachineClass, VIRT_MACHINE)
+ void virt_acpi_setup(VirtMachineState *vms);
+ bool virt_is_acpi_enabled(VirtMachineState *vms);
+ bool cpu_l1_cache_unified(int cpu);
++void parse_denied_events(VirtMachineState *vms, const PmuEventList *events,
++                         Error **errp);
+ 
+ /* Return number of redistributors that fit in the specified region */
+ static uint32_t virt_redist_capacity(VirtMachineState *vms, int region)
+diff --git a/linux-headers/asm-arm64/kvm.h b/linux-headers/asm-arm64/kvm.h
+index 12d39add25..1f7748d839 100644
+--- a/linux-headers/asm-arm64/kvm.h
++++ b/linux-headers/asm-arm64/kvm.h
+@@ -259,6 +259,9 @@ struct kvm_arm_counter_offset {
+ #define KVM_REG_ARM_PTIMER_CVAL		ARM64_SYS_REG(3, 3, 14, 2, 2)
+ #define KVM_REG_ARM_PTIMER_CNT		ARM64_SYS_REG(3, 3, 14, 0, 1)
+ 
++/* PMU Control Register*/
++#define KVM_REG_ARM_PMU_PMCR        ARM64_SYS_REG(3, 3, 9, 12, 0)
++
+ /*
+  * EL0 Virtual Timer Registers
+  *
+diff --git a/qapi/common.json b/qapi/common.json
+index 6fed9cde1a..3d4cb90ecf 100644
+--- a/qapi/common.json
++++ b/qapi/common.json
+@@ -207,3 +207,46 @@
+ ##
+ { 'struct': 'HumanReadableText',
+   'data': { 'human-readable-text': 'str' } }
++
++##
++# @PmuEvent:
++#
++# PMU event type name
++#
++# Since: 6.2
++#
++##
++{ 'enum': 'PmuEvent',
++  'data': [ 'sw-incr', 'l1i-cache-refill', 'l1i-tlb-refill', 'l1d-cache-refill',
++            'l1d-cache', 'l1d-tlb-refill', 'ld-retired', 'st-retired',
++            'inst-retired', 'exc-taken', 'exc-return', 'cid-write-retired',
++            'pc-write-retired', 'br-immed-retired', 'br-return-retired', 'unaligned-ldst-retired',
++            'br-mis-pred', 'cpu-cycles', 'br-pred', 'mem-access',
++            'l1i-cache', 'l1d-cache-wb', 'l2d-cache', 'l2d-cache-refill',
++            'l2d-cache-wb', 'bus-access', 'memory-error', 'inst-spec',
++            'ttbr-write-retired', 'bus-cycles', 'chain', 'l1d-cache-allocate',
++            'l2d-cache-allocate', 'br-retired', 'br-mis-pred-retired', 'stall-frontend',
++            'stall-backend', 'l1d-tlb', 'l1i-tlb', 'l2i-cache',
++            'l2i-cache-refill', 'l3d-cache-allocate', 'l3d-cache-refill', 'l3d-cache',
++            'l3d-cache-wb', 'l2d-tlb-refill', 'l2i-tlb-refill', 'l2d-tlb',
++            'l2i-tlb', 'remote-access', 'll-cache', 'll-cache-miss',
++            'dtlb-walk', 'itlb-walk', 'll-cache-rd', 'll-cache-miss-rd',
++            'remote-access-rd', 'l1d-cache-lmiss-rd', 'op-retired', 'op-spec',
++            'stall', 'stall-slot-backend', 'stall-slot-frontend', 'stall-slot',
++            'sample-pop', 'sample-feed', 'sample-filtrate', 'sample-collision',
++            'cnt-cycles', 'stall-backend-mem', 'l1i-cache-lmiss', 'l2d-cache-lmiss-rd',
++            'l2i-cache-lmiss', 'l3d-cache-lmiss-rd', 'trb-wrap', 'trb-trig',
++            'trcextout0', 'trcextout1', 'trcextout2', 'trcextout3',
++            'cti-trigout4', 'cti-trigout5', 'cti-trigout6', 'cti-trigout7',
++            'ldst-align-lat', 'ld-align-lat', 'st-align-lat', 'mem-access-checked',
++            'mem-access-checked-rd', 'mem-access-checked-wr', 'type-max' ] }
++
++##
++# @PmuEventWrapper:
++#
++# List wrapper of PmuEvent.
++#
++# Since 6.2
++##
++{'struct': 'PmuEventWrapper',
++ 'data': {'event': ['PmuEvent']}}
+diff --git a/qemu-options.hx b/qemu-options.hx
+index 7fe76c4b1d..4889b0adad 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -37,7 +37,9 @@ DEF("machine", HAS_ARG, QEMU_OPTION_machine, \
+     "                memory-encryption=@var{} memory encryption object to use (default=none)\n"
+     "                hmat=on|off controls ACPI HMAT support (default=off)\n"
+     "                memory-backend='backend-id' specifies explicitly provided backend for main RAM (default=none)\n"
+-    "                cxl-fmw.0.targets.0=firsttarget,cxl-fmw.0.targets.1=secondtarget,cxl-fmw.0.size=size[,cxl-fmw.0.interleave-granularity=granularity]\n",
++    "                cxl-fmw.0.targets.0=firsttarget,cxl-fmw.0.targets.1=secondtarget,cxl-fmw.0.size=size[,cxl-fmw.0.interleave-granularity=granularity]\n"
++    "                pmcr-n=counter-num specifies number of PMU counter\n"
++    "                denied-events-type.0=typename specifies closed PMU events list\n",
+     QEMU_ARCH_ALL)
+ SRST
+ ``-machine [type=]name[,prop=value[,...]]``
+@@ -157,6 +159,18 @@ SRST
+         ::
+ 
+             -machine cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.targets.1=cxl.1,cxl-fmw.0.size=128G,cxl-fmw.0.interleave-granularity=512
++    ``pmcr-n='num'``
++        Set the number of PMU counter, the valid value is a integer between 1 and 31. The default is none.
++
++        For example:
++        ::
++            -machine pmcr-n=6
++    ``denied-events-type.0=typename``
++        Specify the denied PMU events list, the valid typename is a arm architecture PMU event name. The default is none.
++
++        For example:
++        ::
++            -machine denied-events-type.0=l1i-cache-refill,denied-event-type.1=l1d-cache-refill
+ ERST
+ 
+ DEF("M", HAS_ARG, QEMU_OPTION_M,
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 3e4941aa47..e00ba1fca3 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -48,6 +48,7 @@
+ #include "disas/capstone.h"
+ #include "fpu/softfloat.h"
+ #include "cpregs.h"
++#include "hw/arm/virt.h"
+ 
+ static void arm_cpu_set_pc(CPUState *cs, vaddr value)
+ {
+@@ -2348,6 +2349,11 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
+ 
+ #ifndef CONFIG_USER_ONLY
+     MachineState *ms = MACHINE(qdev_get_machine());
++    VirtMachineState *vms = VIRT_MACHINE(ms);
++
++    cpu->pmcr_n = vms->pmcr_n;
++    cpu->pmce_bmap[0] = vms->event_info.bmap[0];
++    cpu->pmce_bmap[1] = vms->event_info.bmap[1];
+     unsigned int smp_cpus = ms->smp.cpus;
+     bool has_secure = cpu->has_el3 || arm_feature(env, ARM_FEATURE_M_SECURITY);
+ 
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index d7f0c5a369..d591ee1698 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1188,6 +1188,8 @@ struct ArchCPU {
+ 
+     /* Generic timer counter frequency, in Hz */
+     uint64_t gt_cntfrq_hz;
++    int pmcr_n;
++    uint64_t pmce_bmap[2];
+ };
+ 
+ typedef struct ARMCPUInfo {
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index 284fca8901..af40b6f407 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -36,6 +36,7 @@
+ #include "hw/acpi/ghes.h"
+ #include "qapi/visitor.h"
+ #include "cpu-custom.h"
++#include "hw/arm/virt.h"
+ 
+ static bool have_guest_debug;
+ 
+@@ -155,6 +156,37 @@ static bool kvm_arm_set_device_attr(CPUState *cs, struct kvm_device_attr *attr,
+     return true;
+ }
+ 
++static void kvm_arm_pmu_set_event_filter_attr(CPUState *cs, uint64_t bmap, uint32_t base)
++{
++    struct kvm_pmu_event_filter event_filter;
++    event_filter.action = KVM_PMU_EVENT_DENY;
++    event_filter.nevents = 0;
++    struct kvm_device_attr attr;
++    attr.group = KVM_ARM_VCPU_PMU_V3_CTRL;
++    attr.attr = KVM_ARM_VCPU_PMU_V3_FILTER;
++    attr.addr = (uintptr_t)&event_filter;
++    uint32_t index = 0;
++    while (bmap > 0) {
++        while ((bmap & 1) == 0) {
++            bmap >>= 1;
++            index++;
++        }
++        event_filter.base_event = index + base;
++        while ((bmap & 1) == 1) {
++            bmap >>= 1;
++            index++;
++            event_filter.nevents++;
++        }
++        if (event_filter.nevents > 0) {
++            if (!kvm_arm_set_device_attr(cs, &attr, "PMU")) {
++                error_report("failed to set PMU event filter");
++                abort();
++            }
++            event_filter.nevents = 0;
++        }
++    }
++}
++
+ void kvm_arm_pmu_init(CPUState *cs)
+ {
+     struct kvm_device_attr attr = {
+@@ -171,6 +203,16 @@ void kvm_arm_pmu_init(CPUState *cs)
+     }
+ }
+ 
++void kvm_arm_pmu_set_event_filter(CPUState *cs)
++{
++    if (!ARM_CPU(cs)->has_pmu) {
++        return;
++    }
++    ARMCPU *cpu = ARM_CPU(cs);
++    kvm_arm_pmu_set_event_filter_attr(cs, cpu->pmce_bmap[0], 0);
++    kvm_arm_pmu_set_event_filter_attr(cs, cpu->pmce_bmap[1], ARMV8_SPE_PERFCTR_SAMPLE_POP);
++}
++
+ void kvm_arm_pmu_set_irq(CPUState *cs, int irq)
+ {
+     struct kvm_device_attr attr = {
+@@ -779,6 +821,15 @@ uint32_t kvm_arm_sve_get_vls(CPUState *cs)
+     return vls[0];
+ }
+ 
++static int kvm_arm_pmu_set_pmcr_n(CPUState *cs, int pmcr_n)
++{
++    uint64_t pmcr;
++    kvm_get_one_reg(cs, KVM_REG_ARM_PMU_PMCR, &pmcr);
++    pmcr &= ~(PMCRN_MASK);
++    pmcr |= (pmcr_n << PMCRN_SHIFT);
++    return kvm_set_one_reg(cs, KVM_REG_ARM_PMU_PMCR, &pmcr);
++}
++
+ static int kvm_arm_sve_set_vls(CPUState *cs)
+ {
+     ARMCPU *cpu = ARM_CPU(cs);
+@@ -895,6 +946,13 @@ int kvm_arch_init_vcpu(CPUState *cs)
+         return ret;
+     }
+ 
++    if (cpu->has_pmu && cpu->pmcr_n > 0) {
++        ret = kvm_arm_pmu_set_pmcr_n(cs, cpu->pmcr_n);
++        if (ret) {
++            return ret;
++        }
++    }
++
+     if (cpu_isar_feature(aa64_sve, cpu) && !cpu->kvm_sve_finalized) {
+         ret = kvm_arm_sve_set_vls(cs);
+         if (ret) {
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index 5b3b2507a2..c74ff5171b 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -404,6 +404,7 @@ int kvm_arm_vgic_probe(void);
+ 
+ void kvm_arm_pmu_set_irq(CPUState *cs, int irq);
+ void kvm_arm_pmu_init(CPUState *cs);
++void kvm_arm_pmu_set_event_filter(CPUState *cs);
+ 
+ /**
+  * kvm_arm_pvtime_init:
+@@ -499,6 +500,11 @@ static inline void kvm_arm_pmu_init(CPUState *cs)
+     g_assert_not_reached();
+ }
+ 
++static inline void kvm_arm_pmu_set_event_filter(CPUState *cs)
++{
++    g_assert_not_reached();
++}
++
+ static inline void kvm_arm_pvtime_init(CPUState *cs, uint64_t ipa)
+ {
+     g_assert_not_reached();
+-- 
+2.43.0
+
