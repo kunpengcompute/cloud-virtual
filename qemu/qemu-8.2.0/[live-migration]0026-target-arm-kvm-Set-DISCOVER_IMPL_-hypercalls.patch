@@ -1,0 +1,59 @@
+From 8c6d3f29f1f0099837388e433bc59334697c61fa Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:53:12 +0800
+Subject: [PATCH 26/28] target/arm/kvm: Set DISCOVER_IMPL_* hypercalls
+
+---
+ linux-headers/asm-arm64/kvm.h | 8 ++++++++
+ target/arm/kvm64.c            | 9 +++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/linux-headers/asm-arm64/kvm.h b/linux-headers/asm-arm64/kvm.h
+index 552fdcb18f..12d39add25 100644
+--- a/linux-headers/asm-arm64/kvm.h
++++ b/linux-headers/asm-arm64/kvm.h
+@@ -373,6 +373,14 @@ enum {
+ 	KVM_REG_ARM_VENDOR_HYP_BIT_PTP		= 1,
+ };
+ 
++/* Vendor hyper call function numbers 64-127 */
++#define KVM_REG_ARM_VENDOR_HYP_BMAP_2           KVM_REG_ARM_FW_FEAT_BMAP_REG(3)
++
++enum {
++        KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_VER    = 0,
++        KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_CPUS   = 1,
++};
++
+ /* Device Control API on vm fd */
+ #define KVM_ARM_VM_SMCCC_CTRL		0
+ #define   KVM_ARM_VM_SMCCC_FILTER	0
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index 253dc0cb47..284fca8901 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -794,6 +794,14 @@ static int kvm_arm_sve_set_vls(CPUState *cs)
+     return kvm_set_one_reg(cs, KVM_REG_ARM64_SVE_VLS, &vls[0]);
+ }
+ 
++static int kvm_arm_set_vend_hyp_bmap_2(ARMCPU *cpu)
++{
++    /* Set DISCOVER_IMPL_* hypercalls */
++    uint64_t bmap_2 = MAKE_64BIT_MASK(0, 2);
++
++    return kvm_set_one_reg(CPU(cpu), KVM_REG_ARM_VENDOR_HYP_BMAP_2, &bmap_2);
++}
++
+ static void kvm_arm_writable_idregs_to_cpreg_list(ARMCPU *cpu)
+ {
+     if (!cpu->writable_map) {
+@@ -898,6 +906,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
+         }
+     }
+ 
++    kvm_arm_set_vend_hyp_bmap_2(cpu);
+     /*
+      * KVM reports the exact PSCI version it is implementing via a
+      * special sysreg. If it is present, use its contents to determine
+-- 
+2.43.0
+

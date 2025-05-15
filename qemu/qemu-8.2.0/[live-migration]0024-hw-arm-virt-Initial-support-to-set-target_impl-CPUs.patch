@@ -1,0 +1,229 @@
+From 32394c56cae261a0eb0231513574e5bfeb82d747 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:52:19 +0800
+Subject: [PATCH 24/28] hw/arm/virt: Initial support to set target_impl CPUs
+
+---
+ hw/arm/virt.c        | 62 ++++++++++++++++++++++++++++++++++++++++++
+ include/hw/boards.h  |  3 +++
+ target/arm/kvm.c     | 64 +++++++++++++++++++++++++++++++++++++++++---
+ target/arm/kvm_arm.h |  6 +++++
+ 4 files changed, 131 insertions(+), 4 deletions(-)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index a43f18020c..f05fa08a19 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/cutils.h"
+ #include "qemu/datadir.h"
+ #include "qemu/units.h"
+ #include "qemu/option.h"
+@@ -3047,6 +3048,62 @@ static void virt_set_oem_table_id(Object *obj, const char *value,
+     strncpy(vms->oem_table_id, value, 8);
+ }
+ 
++static TargetImplCpu target_impl_cpus[MAX_TARGET_IMPL_CPUS];
++
++static void virt_set_target_impl_cpus(Object *obj, const char *value,
++                                      Error **errp)
++{
++    MachineState *ms = MACHINE(obj);
++    g_autofree char *target_dup = g_strdup(value);
++    char *target_impl = strtok(target_dup, "-");
++    int cnt = 0;
++
++    while (target_impl) {
++        char num[16];
++        long val;
++        const char *num_start = target_impl;
++        const char *num_end = strchr(num_start, ':');
++
++        if (!num_end) {
++            error_setg(errp,
++                       "Wrong format, Please use 0xmidr:0xrevid-0xmidr:0xrevid");
++            return;
++        }
++
++        strncpy(num, num_start, num_end - num_start);
++        num[num_end - num_start] = '\0';
++        if (qemu_strtol(num, NULL, 16, &val)) {
++            error_setg(errp,
++                       "Wrong format, Please use 0xmidr:0xrevid-0xmidr:0xrevid");
++            return;
++        }
++        target_impl_cpus[cnt].midr = val;
++        num_start = num_end + 1;
++        if (!(*num_start)) {
++            error_setg(errp,
++                       "Wrong format, Please use 0xmidr:0xrevid-0xmidr:0xrevid");
++            return;
++        }
++
++        strncpy(num, num_start, sizeof(num) - 1);
++        num[sizeof(num) - 1] = '\0';
++        if (qemu_strtol(num, NULL, 16, &val)) {
++            error_setg(errp,
++                       "Wrong format, Please use 0xmidr:0xrevid-0xmidr:0xrevid");
++            return;
++        }
++        target_impl_cpus[cnt].revidr = val;
++        cnt++;
++        if (cnt >= MAX_TARGET_IMPL_CPUS) {
++            error_setg(errp,
++                       "Wrong format, Max 4 targets can be set for now!");
++            return;
++        }
++        target_impl = strtok(NULL, "-");
++    }
++    ms->target_ipml_cpu_num = cnt;
++    ms->target_ipml_cpu = target_impl_cpus;
++}
+ 
+ bool virt_is_acpi_enabled(VirtMachineState *vms)
+ {
+@@ -4014,6 +4071,11 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
+                                           "Override the default value of field OEM Table ID "
+                                           "in ACPI table header."
+                                           "The string may be up to 8 bytes in size");
++    object_class_property_add_str(oc, "x-target-impl-cpus", NULL,
++                                  virt_set_target_impl_cpus);
++    object_class_property_set_description(oc, "x-oem-table-id",
++                                          "Describe target cpu impl in the format midr1:revidr1-midr2:revidr2"
++                                          "Maximum 4 midr:revidr pair is supported");
+ 
+ }
+ 
+diff --git a/include/hw/boards.h b/include/hw/boards.h
+index 8ac8cad2a2..192dc7dc09 100644
+--- a/include/hw/boards.h
++++ b/include/hw/boards.h
+@@ -402,6 +402,9 @@ struct MachineState {
+     CpuTopology smp;
+     struct NVDIMMState *nvdimms_state;
+     struct NumaState *numa_state;
++
++    uint32_t target_ipml_cpu_num;
++    void *target_ipml_cpu;
+ };
+ 
+ #define DEFINE_MACHINE(namestr, machine_initfn) \
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 3b30f90a28..0a66f91fcc 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -59,7 +59,7 @@
+ #define ARM_SMCCC_KVM_FUNC_DISCOVER_IMPL_VER    64
+ #define ARM_SMCCC_KVM_FUNC_DISCOVER_IMPL_CPUS   65
+ 
+-#define ARM_SMCCC_KVM_DISCOVER_IMPL_VER_1_0     0x10000
++#define ARM_SMCCC_KVM_DISCOVER_IMPL_VER_1_0     0x100000000
+ 
+ #define ARM_SMCCC_CALL_VAL(type, calling_convention, owner, func_num) \
+         (((type) << ARM_SMCCC_TYPE_SHIFT) | \
+@@ -412,6 +412,16 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
+ 
+     kvm_arm_init_debug(s);
+ 
++    if (kvm_arm_set_smccc_filter(ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_VER_FUNC_ID,
++        KVM_SMCCC_FILTER_FWD_TO_USER)) {
++            error_report("ARM_SMCCC_KVM_FUNC_DISCOVER_IMPL_VER fwd filter install failed");
++    }
++
++    if (kvm_arm_set_smccc_filter(ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_CPUS_FUNC_ID,
++        KVM_SMCCC_FILTER_FWD_TO_USER)) {
++            error_report("ARM_SMCCC_KVM_FUNC_DISCOVER_IMPL_CPUS fwd filter install failed");
++    }
++
+     return ret;
+ }
+ 
+@@ -1071,6 +1081,54 @@ static int kvm_arm_handle_dabt_nisv(CPUState *cs, uint64_t esr_iss,
+     return -1;
+ }
+ 
++static void arm_handle_smcc_kvm_vendor_hypercall(ARMCPU *cpu)
++{
++    MachineState *ms = MACHINE(qdev_get_machine());
++    CPUARMState *env = &cpu->env;
++    uint64_t param[4];
++    int idx;
++    int i;
++
++    for (i = 0; i < 4; i++) {
++        /*
++         * All PSCI functions take explicit 32-bit or native int sized
++         * arguments so we can simply zero-extend all arguments regardless
++         * of which exact function we are about to call.
++         */
++        param[i] = is_a64(env) ? env->xregs[i] : env->regs[i];
++    }
++
++    if (is_a64(env)) {
++        TargetImplCpu *target = ms->target_ipml_cpu;
++
++        switch (param[0]) {
++        case ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_VER_FUNC_ID:
++            if (!ms->target_ipml_cpu_num) {
++                env->xregs[0] = SMCCC_RET_NOT_SUPPORTED;
++                return;
++            }
++            env->xregs[0] = SMCCC_RET_SUCCESS;
++            env->xregs[1] = ARM_SMCCC_KVM_DISCOVER_IMPL_VER_1_0;
++            env->xregs[2] = ms->target_ipml_cpu_num;
++            break;
++        case ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_CPUS_FUNC_ID:
++            idx = param[1];
++            if (idx >= ms->target_ipml_cpu_num) {
++                env->xregs[0] = SMCCC_RET_INVALID_PARAMETER;
++                return;
++            }
++            env->xregs[0] = SMCCC_RET_SUCCESS;
++            env->xregs[1] = target[idx].midr;
++            env->xregs[2] = target[idx].revidr;
++            break;
++        default:
++            env->xregs[0] = SMCCC_RET_NOT_SUPPORTED;
++        }
++    } else {
++        env->regs[0] = SMCCC_RET_NOT_SUPPORTED;
++    }
++}
++
+ static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
+ {
+     ARMCPU *cpu = ARM_CPU(cs);
+@@ -1092,9 +1150,7 @@ static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
+         env->exception.syndrome = syn_aa64_hvc(0);
+     }
+     env->exception.target_el = 1;
+-    qemu_mutex_lock_iothread();
+-    arm_cpu_do_interrupt(cs);
+-    qemu_mutex_unlock_iothread();
++    arm_handle_smcc_kvm_vendor_hypercall(cpu);
+ 
+     /*
+      * For PSCI, exit the kvm_run loop and process the work. Especially
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index baf9cbed0c..5b3b2507a2 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -18,6 +18,12 @@
+ #define KVM_ARM_VGIC_V2   (1 << 0)
+ #define KVM_ARM_VGIC_V3   (1 << 1)
+ 
++#define MAX_TARGET_IMPL_CPUS    4
++typedef struct TargetImplCpu {
++     uint32_t midr;
++     uint32_t revidr;
++} TargetImplCpu;
++
+ /**
+  * kvm_arm_init_debug() - initialize guest debug capabilities
+  * @s: KVMState
+-- 
+2.43.0
+
