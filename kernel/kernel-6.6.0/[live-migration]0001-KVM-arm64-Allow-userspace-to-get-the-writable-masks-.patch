@@ -1,0 +1,266 @@
+From d0e2827fb12b1a2ac1195a98ef49ff3822c8f7c2 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:42:01 +0800
+Subject: [PATCH 01/32] KVM: arm64: Allow userspace to get the writable masks
+ for feature
+
+---
+ Documentation/virt/kvm/api.rst    | 48 ++++++++++++++++++++++
+ arch/arm64/include/asm/kvm_host.h |  3 ++
+ arch/arm64/include/uapi/asm/kvm.h | 32 +++++++++++++++
+ arch/arm64/kvm/arm.c              | 10 +++++
+ arch/arm64/kvm/sys_regs.c         | 66 +++++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h          |  2 +
+ 6 files changed, 161 insertions(+)
+
+diff --git a/Documentation/virt/kvm/api.rst b/Documentation/virt/kvm/api.rst
+index 17811002a8f7..b45580091d3a 100644
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@ -6128,6 +6128,54 @@ writes to the CNTVCT_EL0 and CNTPCT_EL0 registers using the SET_ONE_REG
+ interface. No error will be returned, but the resulting offset will not be
+ applied.
+ 
++4.139 KVM_ARM_GET_REG_WRITABLE_MASKS
++-------------------------------------------
++
++:Capability: KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES
++:Architectures: arm64
++:Type: vm ioctl
++:Parameters: struct reg_mask_range (in/out)
++:Returns: 0 on success, < 0 on error
++
++
++::
++
++        #define KVM_ARM_FEATURE_ID_RANGE	0
++        #define KVM_ARM_FEATURE_ID_RANGE_SIZE	(3 * 8 * 8)
++
++        struct reg_mask_range {
++                __u64 addr;             /* Pointer to mask array */
++                __u32 range;            /* Requested range */
++                __u32 reserved[13];
++        };
++
++This ioctl copies the writable masks for a selected range of registers to
++userspace.
++
++The ``addr`` field is a pointer to the destination array where KVM copies
++the writable masks.
++
++The ``range`` field indicates the requested range of registers.
++``KVM_CHECK_EXTENSION`` for the ``KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES``
++capability returns the supported ranges, expressed as a set of flags. Each
++flag's bit index represents a possible value for the ``range`` field.
++All other values are reserved for future use and KVM may return an error.
++
++The ``reserved[13]`` array is reserved for future use and should be 0, or
++KVM may return an error.
++
++KVM_ARM_FEATURE_ID_RANGE (0)
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++
++The Feature ID range is defined as the AArch64 System register space with
++op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
++
++The mask returned array pointed to by ``addr`` is indexed by the macro
++``ARM64_FEATURE_ID_RANGE_IDX(op0, op1, crn, crm, op2)``, allowing userspace
++to know what fields can be changed for the system register described by
++``op0, op1, crn, crm, op2``. KVM rejects ID register values that describe a
++superset of the features supported by the system.
++
+ 5. The kvm_run structure
+ ========================
+ 
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 4db5ee87988a..d5e03928940d 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1204,6 +1204,9 @@ int kvm_vm_ioctl_mte_copy_tags(struct kvm *kvm,
+ 			       struct kvm_arm_copy_mte_tags *copy_tags);
+ int kvm_vm_ioctl_set_counter_offset(struct kvm *kvm,
+ 				    struct kvm_arm_counter_offset *offset);
++int kvm_vm_ioctl_get_reg_writable_masks(struct kvm *kvm,
++					struct reg_mask_range *range);
++
+ 
+ /* Guest/host FPSIMD coordination helpers */
+ int kvm_arch_vcpu_run_map_fp(struct kvm_vcpu *vcpu);
+diff --git a/arch/arm64/include/uapi/asm/kvm.h b/arch/arm64/include/uapi/asm/kvm.h
+index 97941e582d83..03b027856818 100644
+--- a/arch/arm64/include/uapi/asm/kvm.h
++++ b/arch/arm64/include/uapi/asm/kvm.h
+@@ -509,6 +509,38 @@ struct kvm_smccc_filter {
+ #define KVM_HYPERCALL_EXIT_SMC		(1U << 0)
+ #define KVM_HYPERCALL_EXIT_16BIT	(1U << 1)
+ 
++/*
++ * Get feature ID registers userspace writable mask.
++ *
++ * From DDI0487J.a, D19.2.66 ("ID_AA64MMFR2_EL1, AArch64 Memory Model
++ * Feature Register 2"):
++ *
++ * "The Feature ID space is defined as the System register space in
++ * AArch64 with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7},
++ * op2=={0-7}."
++ *
++ * This covers all currently known R/O registers that indicate
++ * anything useful feature wise, including the ID registers.
++ *
++ * If we ever need to introduce a new range, it will be described as
++ * such in the range field.
++ */
++#define KVM_ARM_FEATURE_ID_RANGE_IDX(op0, op1, crn, crm, op2)		\
++	({								\
++		__u64 __op1 = (op1) & 3;				\
++		__op1 -= (__op1 == 3);					\
++		(__op1 << 6 | ((crm) & 7) << 3 | (op2));		\
++	})
++
++#define KVM_ARM_FEATURE_ID_RANGE	0
++#define KVM_ARM_FEATURE_ID_RANGE_SIZE	(3 * 8 * 8)
++
++struct reg_mask_range {
++	__u64 addr;		/* Pointer to mask array */
++	__u32 range;		/* Requested range */
++	__u32 reserved[13];
++};
++
+ #endif
+ 
+ #endif /* __ARM_KVM_H__ */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index f4194603eae5..35f4d7a541ef 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -423,6 +423,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 	case KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES:
+ 		r = kvm_supported_block_sizes();
+ 		break;
++	case KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES:
++		r = BIT(0);
++		break;
+ #ifdef CONFIG_VIRT_PLAT_DEV
+ 	case KVM_CAP_ARM_VIRT_MSI_BYPASS:
+ 		r = sdev_enable;
+@@ -1882,6 +1885,13 @@ int kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
+ 
+ 		return kvm_vm_set_attr(kvm, &attr);
+ 	}
++	case KVM_ARM_GET_REG_WRITABLE_MASKS: {
++		struct reg_mask_range range;
++
++		if (copy_from_user(&range, argp, sizeof(range)))
++			return -EFAULT;
++		return kvm_vm_ioctl_get_reg_writable_masks(kvm, &range);
++	}
+ #ifdef CONFIG_VIRT_PLAT_DEV
+ 	case KVM_CREATE_SHADOW_DEV: {
+ 		struct kvm_master_dev_info *mdi;
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 0cfa8d93e2ee..d0c68ab96c54 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1406,6 +1406,13 @@ static inline bool is_id_reg(u32 id)
+ 		sys_reg_CRm(id) < 8);
+ }
+ 
++static inline bool is_aa32_id_reg(u32 id)
++{
++	return (sys_reg_Op0(id) == 3 && sys_reg_Op1(id) == 0 &&
++		sys_reg_CRn(id) == 0 && sys_reg_CRm(id) >= 1 &&
++		sys_reg_CRm(id) <= 3);
++}
++
+ static unsigned int id_visibility(const struct kvm_vcpu *vcpu,
+ 				  const struct sys_reg_desc *r)
+ {
+@@ -3698,6 +3705,65 @@ int kvm_arm_copy_sys_reg_indices(struct kvm_vcpu *vcpu, u64 __user *uindices)
+ 	return write_demux_regids(uindices);
+ }
+ 
++#define KVM_ARM_FEATURE_ID_RANGE_INDEX(r)			\
++	KVM_ARM_FEATURE_ID_RANGE_IDX(sys_reg_Op0(r),		\
++		sys_reg_Op1(r),					\
++		sys_reg_CRn(r),					\
++		sys_reg_CRm(r),					\
++		sys_reg_Op2(r))
++
++static bool is_feature_id_reg(u32 encoding)
++{
++	return (sys_reg_Op0(encoding) == 3 &&
++		(sys_reg_Op1(encoding) < 2 || sys_reg_Op1(encoding) == 3) &&
++		sys_reg_CRn(encoding) == 0 &&
++		sys_reg_CRm(encoding) <= 7);
++}
++
++int kvm_vm_ioctl_get_reg_writable_masks(struct kvm *kvm, struct reg_mask_range *range)
++{
++	const void *zero_page = page_to_virt(ZERO_PAGE(0));
++	u64 __user *masks = (u64 __user *)range->addr;
++
++	/* Only feature id range is supported, reserved[13] must be zero. */
++	if (range->range ||
++	    memcmp(range->reserved, zero_page, sizeof(range->reserved)))
++		return -EINVAL;
++
++	/* Wipe the whole thing first */
++	if (clear_user(masks, KVM_ARM_FEATURE_ID_RANGE_SIZE * sizeof(__u64)))
++		return -EFAULT;
++
++	for (int i = 0; i < ARRAY_SIZE(sys_reg_descs); i++) {
++		const struct sys_reg_desc *reg = &sys_reg_descs[i];
++		u32 encoding = reg_to_encoding(reg);
++		u64 val;
++
++		if (!is_feature_id_reg(encoding) || !reg->set_user)
++			continue;
++
++		/*
++		 * For ID registers, we return the writable mask. Other feature
++		 * registers return a full 64bit mask. That's not necessary
++		 * compliant with a given revision of the architecture, but the
++		 * RES0/RES1 definitions allow us to do that.
++		 */
++		if (is_id_reg(encoding)) {
++			if (!reg->val ||
++			    (is_aa32_id_reg(encoding) && !kvm_supports_32bit_el0()))
++				continue;
++			val = reg->val;
++		} else {
++			val = ~0UL;
++		}
++
++		if (put_user(val, (masks + KVM_ARM_FEATURE_ID_RANGE_INDEX(encoding))))
++			return -EFAULT;
++	}
++
++	return 0;
++}
++
+ int __init kvm_sys_reg_table_init(void)
+ {
+ 	struct sys_reg_params params;
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index c4984d20726e..77f89db47c8b 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1200,6 +1200,7 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_COUNTER_OFFSET 227
+ #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
++#define KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES 230
+ 
+ #define KVM_CAP_SEV_ES_GHCB 500
+ 
+@@ -1618,6 +1619,7 @@ struct kvm_s390_ucas_mapping {
+ #define KVM_ARM_MTE_COPY_TAGS	  _IOR(KVMIO,  0xb4, struct kvm_arm_copy_mte_tags)
+ /* Available with KVM_CAP_COUNTER_OFFSET */
+ #define KVM_ARM_SET_COUNTER_OFFSET _IOW(KVMIO,  0xb5, struct kvm_arm_counter_offset)
++#define KVM_ARM_GET_REG_WRITABLE_MASKS _IOR(KVMIO,  0xb6, struct reg_mask_range)
+ 
+ /* ioctl for SW vcpu init*/
+ #define KVM_SW64_VCPU_INIT	  _IO(KVMIO,  0xba)
+-- 
+2.43.0
+
