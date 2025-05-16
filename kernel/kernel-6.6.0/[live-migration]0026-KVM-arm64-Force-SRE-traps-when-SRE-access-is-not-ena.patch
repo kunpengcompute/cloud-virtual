@@ -1,0 +1,89 @@
+From 177e208589c64024b4f66cec32e119013b712ffd Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:02:18 +0800
+Subject: [PATCH 26/32] KVM: arm64: Force SRE traps when SRE access is not
+ enabled
+
+---
+ arch/arm64/kvm/hyp/vgic-v3-sr.c | 22 ++++++++++++++++------
+ arch/arm64/kvm/vgic/vgic-v3.c   |  6 +++++-
+ 2 files changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/vgic-v3-sr.c b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+index 7a9e132f68db..088182e3a398 100644
+--- a/arch/arm64/kvm/hyp/vgic-v3-sr.c
++++ b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+@@ -273,8 +273,16 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	 * starting to mess with the rest of the GIC, and VMCR_EL2 in
+ 	 * particular.  This logic must be called before
+ 	 * __vgic_v3_restore_state().
++	 *
++	 * However, if the vgic is disabled (ICH_HCR_EL2.EN==0), no GIC is
++	 * provisionned at all. In order to prevent illegal accesses to the
++	 * system registers to trap to EL1 (duh), force ICC_SRE_EL1.SRE to 1
++	 * so that the trap bits can take effect. Yes, we *loves* the GIC.
+ 	 */
+-	if (!cpu_if->vgic_sre) {
++	if (!(cpu_if->vgic_hcr & ICH_HCR_EN)) {
++		write_gicreg(ICC_SRE_EL1_SRE, ICC_SRE_EL1);
++		isb();
++	} else if (!cpu_if->vgic_sre) {
+ 		write_gicreg(0, ICC_SRE_EL1);
+ 		isb();
+ 		write_gicreg(cpu_if->vgic_vmcr, ICH_VMCR_EL2);
+@@ -293,8 +301,9 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	}
+ 
+ 	/*
+-	 * Prevent the guest from touching the GIC system registers if
+-	 * SRE isn't enabled for GICv3 emulation.
++	 * Prevent the guest from touching the ICC_SRE_EL1 system
++	 * register. Note that this may not have any effect, as
++	 * ICC_SRE_EL2.Enable being RAO/WI is a valid implementation.
+ 	 */
+ 	write_gicreg(read_gicreg(ICC_SRE_EL2) & ~ICC_SRE_EL2_ENABLE,
+ 		     ICC_SRE_EL2);
+@@ -302,10 +311,11 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	/*
+ 	 * If we need to trap system registers, we must write
+ 	 * ICH_HCR_EL2 anyway, even if no interrupts are being
+-	 * injected,
++	 * injected. Note that this also applies if we don't expect
++	 * any system register access (GICv2 or no vgic at all).
+ 	 */
+ 	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+-	    cpu_if->its_vpe.its_vm)
++		cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+ 		write_gicreg(cpu_if->vgic_hcr, ICH_HCR_EL2);
+ }
+ 
+@@ -331,7 +341,7 @@ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	 * no interrupts were being injected, and we disable it again here.
+ 	 */
+ 	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+-	    cpu_if->its_vpe.its_vm)
++		cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+ 		write_gicreg(0, ICH_HCR_EL2);
+ }
+ 
+diff --git a/arch/arm64/kvm/vgic/vgic-v3.c b/arch/arm64/kvm/vgic/vgic-v3.c
+index fb7fa0cd7e3d..67033518da76 100644
+--- a/arch/arm64/kvm/vgic/vgic-v3.c
++++ b/arch/arm64/kvm/vgic/vgic-v3.c
+@@ -303,8 +303,12 @@ void vcpu_set_ich_hcr(struct kvm_vcpu *vcpu)
+ {
+ 	struct vgic_v3_cpu_if *vgic_v3 = &vcpu->arch.vgic_cpu.vgic_v3;
+ 
+-	if (!kvm_has_gicv3(vcpu->kvm))
++	/* Hide GICv3 sysreg if necessary */
++	if (!kvm_has_gicv3(vcpu->kvm)) {
++		vgic_v3->vgic_hcr |= ICH_HCR_TALL0 | ICH_HCR_TALL1 | ICH_HCR_TC;
+ 		return;
++	}
++
+ 	if (group0_trap)
+ 		vgic_v3->vgic_hcr |= ICH_HCR_TALL0;
+ 	if (group1_trap)
+-- 
+2.43.0
+

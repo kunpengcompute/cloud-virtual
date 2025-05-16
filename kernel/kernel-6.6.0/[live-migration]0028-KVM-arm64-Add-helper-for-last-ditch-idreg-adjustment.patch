@@ -1,0 +1,85 @@
+From cb672aa6fffe0e0fe57617e0edc33262881b08ab Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:03:50 +0800
+Subject: [PATCH 28/32] KVM: arm64: Add helper for last ditch idreg adjustments
+
+---
+ arch/arm64/kvm/arm.c      |  7 +++++++
+ arch/arm64/kvm/sys_regs.c | 22 ++++++++++++++++++++++
+ arch/arm64/kvm/sys_regs.h |  2 ++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index b8800671a757..f7483b314ced 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -48,6 +48,8 @@
+ #include <kvm/arm_pmu.h>
+ #include <kvm/arm_psci.h>
+ 
++#include "sys_regs.h"
++
+ static enum kvm_mode kvm_mode = KVM_MODE_DEFAULT;
+ 
+ #include "hisilicon/hisi_virt.h"
+@@ -793,6 +795,11 @@ int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
+ 		if (ret)
+ 			return ret;
+ 	}
++
++	ret = kvm_finalize_sys_regs(vcpu);
++	if (ret)
++		return ret;
++
+ 	kvm_calculate_traps(vcpu);
+ 
+ 	ret = kvm_timer_enable(vcpu);
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index e50d59b96b42..355e3df878f8 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -4086,6 +4086,28 @@ void kvm_calculate_traps(struct kvm_vcpu *vcpu)
+ 	mutex_unlock(&kvm->arch.config_lock);
+ }
+ 
++/*
++ * Perform last adjustments to the ID registers that are implied by the
++ * configuration outside of the ID regs themselves, as well as any
++ * initialisation that directly depend on these ID registers (such as
++ * RES0/RES1 behaviours). This is not the place to configure traps though.
++ *
++ * Because this can be called once per CPU, changes must be idempotent.
++ */
++int kvm_finalize_sys_regs(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	guard(mutex)(&kvm->arch.config_lock);
++
++	if (!kvm_has_gicv3(kvm)) {
++		kvm->arch.id_regs[IDREG_IDX(SYS_ID_AA64PFR0_EL1)] &= ~ID_AA64PFR0_EL1_GIC_MASK;
++		kvm->arch.id_regs[IDREG_IDX(SYS_ID_PFR1_EL1)] &= ~ID_PFR1_EL1_GIC_MASK;
++	}
++
++	return 0;
++}
++
+ int __init kvm_sys_reg_table_init(void)
+ {
+ 	bool valid = true;
+diff --git a/arch/arm64/kvm/sys_regs.h b/arch/arm64/kvm/sys_regs.h
+index 3080693719d2..720a8bb93372 100644
+--- a/arch/arm64/kvm/sys_regs.h
++++ b/arch/arm64/kvm/sys_regs.h
+@@ -238,6 +238,8 @@ int kvm_sys_reg_get_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
+ int kvm_sys_reg_set_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
+ 			 const struct sys_reg_desc table[], unsigned int num);
+ 
++int kvm_finalize_sys_regs(struct kvm_vcpu *vcpu);
++
+ #define AA32(_x)	.aarch32_map = AA32_##_x
+ #define Op0(_x) 	.Op0 = _x
+ #define Op1(_x) 	.Op1 = _x
+-- 
+2.43.0
+

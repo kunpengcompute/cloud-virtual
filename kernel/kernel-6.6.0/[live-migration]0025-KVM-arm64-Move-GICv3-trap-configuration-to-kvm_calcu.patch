@@ -1,0 +1,93 @@
+From beea5fcb3fc9335f20fabc5d1af1987e1c994cd0 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:01:44 +0800
+Subject: [PATCH 25/32] KVM: arm64: Move GICv3 trap configuration to
+ kvm_calculate_traps()
+
+---
+ arch/arm64/include/asm/kvm_host.h | 1 +
+ arch/arm64/kvm/arm.c              | 1 +
+ arch/arm64/kvm/sys_regs.c         | 9 +++++++++
+ arch/arm64/kvm/vgic/vgic-v3.c     | 8 ++++++++
+ arch/arm64/kvm/vgic/vgic.h        | 2 ++
+ 5 files changed, 21 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 264b4b0a9598..b72eb25558df 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1074,6 +1074,7 @@ int __init populate_nv_trap_config(void);
+ 
+ bool lock_all_vcpus(struct kvm *kvm);
+ void unlock_all_vcpus(struct kvm *kvm);
++void kvm_calculate_traps(struct kvm_vcpu *vcpu);
+ 
+ /* MMIO helpers */
+ void kvm_mmio_write_buf(void *buf, unsigned int len, unsigned long data);
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 66df0b1561a1..b8800671a757 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -793,6 +793,7 @@ int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
+ 		if (ret)
+ 			return ret;
+ 	}
++	kvm_calculate_traps(vcpu);
+ 
+ 	ret = kvm_timer_enable(vcpu);
+ 	if (ret)
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index aa608680794d..e50d59b96b42 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -4077,6 +4077,15 @@ int kvm_vm_ioctl_get_reg_writable_masks(struct kvm *kvm, struct reg_mask_range *
+ 	return 0;
+ }
+ 
++void kvm_calculate_traps(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	mutex_lock(&kvm->arch.config_lock);
++	vcpu_set_ich_hcr(vcpu);
++	mutex_unlock(&kvm->arch.config_lock);
++}
++
+ int __init kvm_sys_reg_table_init(void)
+ {
+ 	bool valid = true;
+diff --git a/arch/arm64/kvm/vgic/vgic-v3.c b/arch/arm64/kvm/vgic/vgic-v3.c
+index dab599e857b5..fb7fa0cd7e3d 100644
+--- a/arch/arm64/kvm/vgic/vgic-v3.c
++++ b/arch/arm64/kvm/vgic/vgic-v3.c
+@@ -297,6 +297,14 @@ void vgic_v3_enable(struct kvm_vcpu *vcpu)
+ 
+ 	/* Get the show on the road... */
+ 	vgic_v3->vgic_hcr = ICH_HCR_EN;
++}
++
++void vcpu_set_ich_hcr(struct kvm_vcpu *vcpu)
++{
++	struct vgic_v3_cpu_if *vgic_v3 = &vcpu->arch.vgic_cpu.vgic_v3;
++
++	if (!kvm_has_gicv3(vcpu->kvm))
++		return;
+ 	if (group0_trap)
+ 		vgic_v3->vgic_hcr |= ICH_HCR_TALL0;
+ 	if (group1_trap)
+diff --git a/arch/arm64/kvm/vgic/vgic.h b/arch/arm64/kvm/vgic/vgic.h
+index f78c026c20f0..70446e54fdd3 100644
+--- a/arch/arm64/kvm/vgic/vgic.h
++++ b/arch/arm64/kvm/vgic/vgic.h
+@@ -355,6 +355,8 @@ void vgic_v4_configure_vsgis(struct kvm *kvm);
+ void vgic_update_vsgi(struct vgic_irq *irq);
+ void vgic_v4_get_vlpi_state(struct vgic_irq *irq, bool *val);
+ int vgic_v4_request_vpe_irq(struct kvm_vcpu *vcpu, int irq);
++void vcpu_set_ich_hcr(struct kvm_vcpu *vcpu);
++
+ #ifdef CONFIG_VIRT_VTIMER_IRQ_BYPASS
+ void vgic_v4_configure_vtimer(struct kvm *kvm);
+ #endif
+-- 
+2.43.0
+
