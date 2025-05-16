@@ -1,0 +1,164 @@
+From e1ec1c29b2ad8bd9f00342dc7c5ad0f0a204111c Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:57:16 +0800
+Subject: [PATCH 20/32] KVM: arm64: Add feature checking helpers
+
+---
+ arch/arm64/include/asm/kvm_host.h | 45 +++++++++++++++++++++++++++++++
+ arch/arm64/kvm/pmu-emul.c         | 11 ++++----
+ arch/arm64/kvm/sys_regs.c         |  6 ++---
+ include/kvm/arm_pmu.h             | 11 --------
+ 4 files changed, 53 insertions(+), 20 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index fbc5c9949a1b..264b4b0a9598 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1321,4 +1321,49 @@ extern bool force_wfi_trap;
+ extern bool kvm_ncsnp_support;
+ extern bool kvm_dvmbm_support;
+ 
++#define __expand_field_sign_unsigned(id, fld, val)			\
++	((u64)SYS_FIELD_VALUE(id, fld, val))
++
++#define __expand_field_sign_signed(id, fld, val)			\
++	({								\
++		u64 __val = SYS_FIELD_VALUE(id, fld, val);		\
++		sign_extend64(__val, id##_##fld##_WIDTH - 1);		\
++	})
++
++#define expand_field_sign(id, fld, val)					\
++	(id##_##fld##_SIGNED ?						\
++	 __expand_field_sign_signed(id, fld, val) :			\
++	 __expand_field_sign_unsigned(id, fld, val))
++
++#define get_idreg_field_unsigned(kvm, id, fld)				\
++	({								\
++		u64 __val = IDREG((kvm), SYS_##id);			\
++		FIELD_GET(id##_##fld##_MASK, __val);			\
++	})
++
++#define get_idreg_field_signed(kvm, id, fld)				\
++	({								\
++		u64 __val = get_idreg_field_unsigned(kvm, id, fld);	\
++		sign_extend64(__val, id##_##fld##_WIDTH - 1);		\
++	})
++
++#define get_idreg_field_enum(kvm, id, fld)				\
++	get_idreg_field_unsigned(kvm, id, fld)
++
++#define get_idreg_field(kvm, id, fld)					\
++	(id##_##fld##_SIGNED ?						\
++	 get_idreg_field_signed(kvm, id, fld) :				\
++	 get_idreg_field_unsigned(kvm, id, fld))
++
++#define kvm_has_feat(kvm, id, fld, limit)				\
++	(get_idreg_field((kvm), id, fld) >= expand_field_sign(id, fld, limit))
++
++#define kvm_has_feat_enum(kvm, id, fld, val)				\
++	(get_idreg_field_unsigned((kvm), id, fld) == __expand_field_sign_unsigned(id, fld, val))
++
++#define kvm_has_feat_range(kvm, id, fld, min, max)			\
++	(get_idreg_field((kvm), id, fld) >= expand_field_sign(id, fld, min) && \
++	 get_idreg_field((kvm), id, fld) <= expand_field_sign(id, fld, max))
++
++
+ #endif /* __ARM64_KVM_HOST_H__ */
+diff --git a/arch/arm64/kvm/pmu-emul.c b/arch/arm64/kvm/pmu-emul.c
+index d602a3f3f517..95eb57b139b5 100644
+--- a/arch/arm64/kvm/pmu-emul.c
++++ b/arch/arm64/kvm/pmu-emul.c
+@@ -65,12 +65,11 @@ u64 kvm_pmu_evtyper_mask(struct kvm *kvm)
+ {
+ 	u64 mask = ARMV8_PMU_EXCLUDE_EL1 | ARMV8_PMU_EXCLUDE_EL0 |
+ 		   kvm_pmu_event_mask(kvm);
+-	u64 pfr0 = IDREG(kvm, SYS_ID_AA64PFR0_EL1);
+ 
+-	if (SYS_FIELD_GET(ID_AA64PFR0_EL1, EL2, pfr0))
++	if (kvm_has_feat(kvm, ID_AA64PFR0_EL1, EL2, IMP))
+ 		mask |= ARMV8_PMU_INCLUDE_EL2;
+ 
+-	if (SYS_FIELD_GET(ID_AA64PFR0_EL1, EL3, pfr0))
++	if (kvm_has_feat(kvm, ID_AA64PFR0_EL1, EL3, IMP))
+ 		mask |= ARMV8_PMU_EXCLUDE_NS_EL0 |
+ 			ARMV8_PMU_EXCLUDE_NS_EL1 |
+ 			ARMV8_PMU_EXCLUDE_EL3;
+@@ -84,8 +83,10 @@ u64 kvm_pmu_evtyper_mask(struct kvm *kvm)
+  */
+ static bool kvm_pmc_is_64bit(struct kvm_pmc *pmc)
+ {
++	struct kvm_vcpu *vcpu = kvm_pmc_to_vcpu(pmc);
++
+ 	return (pmc->idx == ARMV8_PMU_CYCLE_IDX ||
+-		kvm_pmu_is_3p5(kvm_pmc_to_vcpu(pmc)));
++		kvm_has_feat(vcpu->kvm, ID_AA64DFR0_EL1, PMUVer, V3P5));
+ }
+ 
+ static bool kvm_pmc_has_64bit_overflow(struct kvm_pmc *pmc)
+@@ -565,7 +566,7 @@ void kvm_pmu_handle_pmcr(struct kvm_vcpu *vcpu, u64 val)
+ 		return;
+ 
+ 	/* Fixup PMCR_EL0 to reconcile the PMU version and the LP bit */
+-	if (!kvm_pmu_is_3p5(vcpu))
++	if (!kvm_has_feat(vcpu->kvm, ID_AA64DFR0_EL1, PMUVer, V3P5))
+ 		val &= ~ARMV8_PMU_PMCR_LP;
+ 
+ 	/* The reset bits don't indicate any state, and shouldn't be saved. */
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 6c3f12441184..fac9683e3018 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -386,10 +386,9 @@ static bool trap_loregion(struct kvm_vcpu *vcpu,
+ 			  struct sys_reg_params *p,
+ 			  const struct sys_reg_desc *r)
+ {
+-	u64 val = IDREG(vcpu->kvm, SYS_ID_AA64MMFR1_EL1);
+ 	u32 sr = reg_to_encoding(r);
+ 
+-	if (!(val & (0xfUL << ID_AA64MMFR1_EL1_LO_SHIFT))) {
++	if (!kvm_has_feat(vcpu->kvm, ID_AA64MMFR1_EL1, LO, IMP)) {
+ 		kvm_inject_undefined(vcpu);
+ 		return false;
+ 	}
+@@ -2791,8 +2790,7 @@ static bool trap_dbgdidr(struct kvm_vcpu *vcpu,
+ 		return ignore_write(vcpu, p);
+ 	} else {
+ 		u64 dfr = kvm_read_vm_id_reg(vcpu->kvm, SYS_ID_AA64DFR0_EL1);
+-		u64 pfr = IDREG(vcpu->kvm, SYS_ID_AA64PFR0_EL1);
+-		u32 el3 = !!cpuid_feature_extract_unsigned_field(pfr, ID_AA64PFR0_EL1_EL3_SHIFT);
++		u32 el3 = kvm_has_feat(vcpu->kvm, ID_AA64PFR0_EL1, EL3, IMP);
+ 
+ 		p->regval = ((((dfr >> ID_AA64DFR0_EL1_WRPs_SHIFT) & 0xf) << 28) |
+ 			     (((dfr >> ID_AA64DFR0_EL1_BRPs_SHIFT) & 0xf) << 24) |
+diff --git a/include/kvm/arm_pmu.h b/include/kvm/arm_pmu.h
+index 2ad953b65d45..d9561092cfd2 100644
+--- a/include/kvm/arm_pmu.h
++++ b/include/kvm/arm_pmu.h
+@@ -91,16 +91,6 @@ void kvm_vcpu_pmu_resync_el0(void);
+ 			vcpu->arch.pmu.events = *kvm_get_pmu_events();	\
+ 	} while (0)
+ 
+-/*
+- * Evaluates as true when emulating PMUv3p5, and false otherwise.
+- */
+-#define kvm_pmu_is_3p5(vcpu) ({						\
+-	u64 val = IDREG(vcpu->kvm, SYS_ID_AA64DFR0_EL1);		\
+-	u8 pmuver = SYS_FIELD_GET(ID_AA64DFR0_EL1, PMUVer, val);	\
+-									\
+-	pmuver >= ID_AA64DFR0_EL1_PMUVer_V3P5;				\
+-})
+-
+ u8 kvm_arm_pmu_get_pmuver_limit(void);
+ int kvm_arm_set_default_pmu(struct kvm *kvm);
+ int kvm_arm_pmu_get_max_counters(struct kvm *kvm);
+@@ -170,7 +160,6 @@ static inline u64 kvm_pmu_get_pmceid(struct kvm_vcpu *vcpu, bool pmceid1)
+ }
+ 
+ #define kvm_vcpu_has_pmu(vcpu)		({ false; })
+-#define kvm_pmu_is_3p5(vcpu)		({ false; })
+ static inline void kvm_pmu_update_vcpu_events(struct kvm_vcpu *vcpu) {}
+ static inline void kvm_vcpu_pmu_restore_guest(struct kvm_vcpu *vcpu) {}
+ static inline void kvm_vcpu_pmu_restore_host(struct kvm_vcpu *vcpu) {}
+-- 
+2.43.0
+

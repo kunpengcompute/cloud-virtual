@@ -1,0 +1,46 @@
+From 58d0f3f72369d925c415dc3eaa5e35a6199062d5 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:56:07 +0800
+Subject: [PATCH 18/32] KVM: arm64: Make the exposed feature bits in
+ AA64DFR0_EL1 writable from userspace
+
+---
+ arch/arm64/kvm/sys_regs.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index ec62801ed289..328f3eb18c32 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1871,7 +1871,7 @@ static bool access_ctr(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	if (p->is_write)
+ 		return write_to_read_only(vcpu, p, r);
+ 
+-		p->regval = kvm_read_vm_id_reg(vcpu->kvm, SYS_CTR_EL0);
++	p->regval = kvm_read_vm_id_reg(vcpu->kvm, SYS_CTR_EL0);
+ 	return true;
+ }
+ 
+@@ -2330,7 +2330,18 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	  .get_user = get_id_reg,
+ 	  .set_user = set_id_aa64dfr0_el1,
+ 	  .reset = read_sanitised_id_aa64dfr0_el1,
+-	  .val = ID_AA64DFR0_EL1_PMUVer_MASK |
++	  /*
++	 * We can't still make BRPs and CTX_CMPx writable as highest
++	 * numbered breakpoints must be context aware breakpoints(ARM ARM
++	 * DDI 0487K.a, section G2.8.2 Breakpoint types and linking of
++	 * breakpoints). Hence, if the number of non-context aware breakpoints
++	 * for the Guest is decreased by userspace, that will be problematic
++	 * as KVM will map context aware breakpoints for the vCPU to different
++	 * numbered breakpoints for the pCPU.
++	 */
++	  .val = ID_AA64DFR0_EL1_DoubleLock_MASK |
++			 ID_AA64DFR0_EL1_WRPs_MASK |
++			 ID_AA64DFR0_EL1_PMUVer_MASK |
+ 			 ID_AA64DFR0_EL1_DebugVer_MASK, },
+ 	ID_SANITISED(ID_AA64DFR1_EL1),
+ 	ID_UNALLOCATED(5,2),
+-- 
+2.43.0
+

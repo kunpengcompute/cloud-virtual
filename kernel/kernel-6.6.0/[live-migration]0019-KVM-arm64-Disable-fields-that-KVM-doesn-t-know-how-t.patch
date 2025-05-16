@@ -1,0 +1,31 @@
+From 8533e2e3d8d7e21d0814a461d66c640d75e41de6 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:56:48 +0800
+Subject: [PATCH 19/32] KVM: arm64: Disable fields that KVM doesn't know how to
+ handle in ID_AA64PFR1_EL1
+
+---
+ arch/arm64/kvm/sys_regs.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 328f3eb18c32..6c3f12441184 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1475,6 +1475,13 @@ static u64 __kvm_read_sanitised_id_reg(const struct kvm_vcpu *vcpu,
+ 		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_SME);
+ 		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_NMI);
+ 		val |= FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_NMI), vcpu->kvm->arch.pfr1_nmi);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_RNDR_trap);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_MTE_frac);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_GCS);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_THE);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_MTEX);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_DF2);
++		val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_PFAR);
+ 		break;
+ 	case SYS_ID_AA64ISAR1_EL1:
+ 		if (!vcpu_has_ptrauth(vcpu))
+-- 
+2.43.0
+
