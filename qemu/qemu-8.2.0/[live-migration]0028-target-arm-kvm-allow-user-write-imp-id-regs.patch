@@ -1,0 +1,139 @@
+From e2df0adb1beaa5d2ac3acf94bf5e3a163a8ff8c8 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:55:32 +0800
+Subject: [PATCH 28/28] target/arm/kvm: allow user write imp id regs
+
+---
+ linux-headers/linux/kvm.h          |  1 +
+ target/arm/cpu-sysreg-properties.c | 12 ++++++++++++
+ target/arm/cpu-sysregs.h.inc       |  4 +++-
+ target/arm/kvm.c                   |  4 ++++
+ target/arm/kvm64.c                 |  5 +++++
+ target/arm/kvm_arm.h               | 12 ++++++++++++
+ 6 files changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/linux-headers/linux/kvm.h b/linux-headers/linux/kvm.h
+index 44a326fddc..52528a0075 100644
+--- a/linux-headers/linux/kvm.h
++++ b/linux-headers/linux/kvm.h
+@@ -1200,6 +1200,7 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
+ #define KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES 230
++#define KVM_CAP_ARM_WRITABLE_IMP_ID_REGS 239
+ 
+ #define KVM_CAP_ARM_TMM 300
+ 
+diff --git a/target/arm/cpu-sysreg-properties.c b/target/arm/cpu-sysreg-properties.c
+index 05eb404873..12acdb8dc7 100644
+--- a/target/arm/cpu-sysreg-properties.c
++++ b/target/arm/cpu-sysreg-properties.c
+@@ -6,6 +6,14 @@ void initialize_cpu_sysreg_properties(void)
+ {
+     memset(arm64_id_regs, 0, sizeof(ARM64SysReg) * NUM_ID_IDX);
+ 
++    /* MIDR_EL1 */
++    ARM64SysReg *MIDR_EL1 = arm64_sysreg_get(MIDR_EL1_IDX);
++    MIDR_EL1->name = "MIDR_EL1";
++
++    /* REVIDR_EL1 */
++    ARM64SysReg *REVIDR_EL1 = arm64_sysreg_get(REVIDR_EL1_IDX);
++    REVIDR_EL1->name = "REVIDR_EL1";
++
+     /* ID_PFR0_EL1 */
+     ARM64SysReg *ID_PFR0_EL1 = arm64_sysreg_get(ID_PFR0_EL1_IDX);
+     ID_PFR0_EL1->name = "ID_PFR0_EL1";
+@@ -619,6 +627,10 @@ void initialize_cpu_sysreg_properties(void)
+     arm64_sysreg_add_field(SMIDR_EL1, "SMPS", 15, 15);
+     arm64_sysreg_add_field(SMIDR_EL1, "AFFINITY", 0, 11);
+ 
++    /* AIDR_EL1 */
++    ARM64SysReg *AIDR_EL1 = arm64_sysreg_get(AIDR_EL1_IDX);
++    AIDR_EL1->name = "AIDR_EL1";
++
+     /* CSSELR_EL1 */
+     ARM64SysReg *CSSELR_EL1 = arm64_sysreg_get(CSSELR_EL1_IDX);
+     CSSELR_EL1->name = "CSSELR_EL1";
+diff --git a/target/arm/cpu-sysregs.h.inc b/target/arm/cpu-sysregs.h.inc
+index 12c8405f24..fcb839e835 100644
+--- a/target/arm/cpu-sysregs.h.inc
++++ b/target/arm/cpu-sysregs.h.inc
+@@ -1,4 +1,5 @@
+-
++DEF(MIDR_EL1, 3, 0, 0, 0, 0)
++DEF(REVIDR_EL1, 3, 0, 0, 0, 6)
+ DEF(ID_PFR0_EL1, 3, 0, 0, 1, 0)
+ DEF(ID_PFR1_EL1, 3, 0, 0, 1, 1)
+ DEF(ID_DFR0_EL1, 3, 0, 0, 1, 2)
+@@ -46,6 +47,7 @@ DEF(CLIDR_EL1, 3, 1, 0, 0, 1)
+ DEF(CCSIDR2_EL1, 3, 1, 0, 0, 2)
+ DEF(GMID_EL1, 3, 1, 0, 0, 4)
+ DEF(SMIDR_EL1, 3, 1, 0, 0, 6)
++DEF(AIDR_EL1, 3, 1, 0, 0, 7)
+ DEF(CSSELR_EL1, 3, 2, 0, 0, 0)
+ DEF(CTR_EL0, 3, 3, 0, 0, 1)
+ DEF(DCZID_EL0, 3, 3, 0, 0, 7)
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 7be1a0f123..ef09b235cb 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -372,6 +372,10 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
+         }
+     }
+ 
++    if (kvm_arm_imp_id_regs_writabled()) {
++        kvm_vm_enable_cap(s, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, 0);
++    }
++
+     if (s->kvm_eager_split_size) {
+         uint32_t sizes;
+ 
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index af40b6f407..f8e7e3ee80 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -760,6 +760,11 @@ bool kvm_arm_sve_supported(void)
+     return kvm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
+ }
+ 
++bool kvm_arm_imp_id_regs_writabled(void)
++{
++    return kvm_check_extension(kvm_state, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS);
++}
++
+ bool kvm_arm_steal_time_supported(void)
+ {
+     return kvm_check_extension(kvm_state, KVM_CAP_STEAL_TIME);
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index c74ff5171b..73d98b819d 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -352,6 +352,13 @@ bool kvm_arm_pmu_supported(void);
+  */
+ bool kvm_arm_sve_supported(void);
+ 
++/**
++ * kvm_arm_imp_id_regs_writabled:
++ *
++ * Returns true if KVM can enable imp_id_regs writable.
++ */
++bool kvm_arm_imp_id_regs_writabled(void);
++
+ /**
+  * kvm_arm_get_max_vm_ipa_size:
+  * @ms: Machine state handle
+@@ -456,6 +463,11 @@ static inline bool kvm_arm_sve_supported(void)
+     return false;
+ }
+ 
++static inline bool kvm_arm_imp_id_regs_writabled(void)
++{
++    return false;
++}
++
+ static inline bool kvm_arm_steal_time_supported(void)
+ {
+     return false;
+-- 
+2.43.0
+

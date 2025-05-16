@@ -1,0 +1,216 @@
+From 704551ecd055fc28c0ccadcc75db57de160a98a4 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:27:20 +0800
+Subject: [PATCH 01/28] arm/cpu: Add sysreg definitions in cpu-sysregs.h
+
+---
+ target/arm/cpu-sysregs.h     | 42 ++++++++++++++++++++++++++++++
+ target/arm/cpu-sysregs.h.inc | 35 +++++++++++++++++++++++++
+ target/arm/cpu.h             | 50 +++++++++++++++++++++++++++++++++++-
+ target/arm/cpu64.c           | 22 ++++++++++++++++
+ 4 files changed, 148 insertions(+), 1 deletion(-)
+ create mode 100644 target/arm/cpu-sysregs.h
+ create mode 100644 target/arm/cpu-sysregs.h.inc
+
+diff --git a/target/arm/cpu-sysregs.h b/target/arm/cpu-sysregs.h
+new file mode 100644
+index 0000000000..17852353d3
+--- /dev/null
++++ b/target/arm/cpu-sysregs.h
+@@ -0,0 +1,42 @@
++/*
++ * Definitions for Arm ID system registers
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef ARM_CPU_SYSREGS_H
++#define ARM_CPU_SYSREGS_H
++
++/*
++ * Following is similar to the coprocessor regs encodings, but with an argument
++ * ordering that matches the ARM ARM. We also reuse the various CP_REG_ defines
++ * that actually are the same as the equivalent KVM_REG_ values.
++ */
++#define ENCODE_ID_REG(op0, op1, crn, crm, op2)          \
++    (((op0) << CP_REG_ARM64_SYSREG_OP0_SHIFT) |         \
++     ((op1) << CP_REG_ARM64_SYSREG_OP1_SHIFT) |         \
++     ((crn) << CP_REG_ARM64_SYSREG_CRN_SHIFT) |         \
++     ((crm) << CP_REG_ARM64_SYSREG_CRM_SHIFT) |         \
++     ((op2) << CP_REG_ARM64_SYSREG_OP2_SHIFT))
++
++#define DEF(NAME, OP0, OP1, CRN, CRM, OP2) NAME##_IDX,
++
++typedef enum ARMIDRegisterIdx {
++#include "cpu-sysregs.h.inc"
++    NUM_ID_IDX,
++} ARMIDRegisterIdx;
++
++#undef DEF
++#define DEF(NAME, OP0, OP1, CRN, CRM, OP2) \
++    SYS_##NAME = ENCODE_ID_REG(OP0, OP1, CRN, CRM, OP2),
++
++typedef enum ARMSysRegs {
++#include "cpu-sysregs.h.inc"
++} ARMSysRegs;
++
++#undef DEF
++
++extern const uint32_t id_register_sysreg[NUM_ID_IDX];
++
++int get_sysreg_idx(ARMSysRegs sysreg);
++
++#endif /* ARM_CPU_SYSREGS_H */
+\ No newline at end of file
+diff --git a/target/arm/cpu-sysregs.h.inc b/target/arm/cpu-sysregs.h.inc
+new file mode 100644
+index 0000000000..68322d37bf
+--- /dev/null
++++ b/target/arm/cpu-sysregs.h.inc
+@@ -0,0 +1,35 @@
++DEF(ID_AA64PFR0_EL1, 3, 0, 0, 4, 0)
++DEF(ID_AA64PFR1_EL1, 3, 0, 0, 4, 1)
++DEF(ID_AA64SMFR0_EL1, 3, 0, 0, 4, 5)
++DEF(ID_AA64DFR0_EL1, 3, 0, 0, 5, 0)
++DEF(ID_AA64DFR1_EL1, 3, 0, 0, 5, 1)
++DEF(ID_AA64ISAR0_EL1, 3, 0, 0, 6, 0)
++DEF(ID_AA64ISAR1_EL1, 3, 0, 0, 6, 1)
++DEF(ID_AA64ISAR2_EL1, 3, 0, 0, 6, 2)
++DEF(ID_AA64MMFR0_EL1, 3, 0, 0, 7, 0)
++DEF(ID_AA64MMFR1_EL1, 3, 0, 0, 7, 1)
++DEF(ID_AA64MMFR2_EL1, 3, 0, 0, 7, 2)
++DEF(ID_AA64MMFR3_EL1, 3, 0, 0, 7, 3)
++DEF(ID_PFR0_EL1, 3, 0, 0, 1, 0)
++DEF(ID_PFR1_EL1, 3, 0, 0, 1, 1)
++DEF(ID_DFR0_EL1, 3, 0, 0, 1, 2)
++DEF(ID_MMFR0_EL1, 3, 0, 0, 1, 4)
++DEF(ID_MMFR1_EL1, 3, 0, 0, 1, 5)
++DEF(ID_MMFR2_EL1, 3, 0, 0, 1, 6)
++DEF(ID_MMFR3_EL1, 3, 0, 0, 1, 7)
++DEF(ID_ISAR0_EL1, 3, 0, 0, 2, 0)
++DEF(ID_ISAR1_EL1, 3, 0, 0, 2, 1)
++DEF(ID_ISAR2_EL1, 3, 0, 0, 2, 2)
++DEF(ID_ISAR3_EL1, 3, 0, 0, 2, 3)
++DEF(ID_ISAR4_EL1, 3, 0, 0, 2, 4)
++DEF(ID_ISAR5_EL1, 3, 0, 0, 2, 5)
++DEF(ID_MMFR4_EL1, 3, 0, 0, 2, 6)
++DEF(ID_ISAR6_EL1, 3, 0, 0, 2, 7)
++DEF(MVFR0_EL1, 3, 0, 0, 3, 0)
++DEF(MVFR1_EL1, 3, 0, 0, 3, 1)
++DEF(MVFR2_EL1, 3, 0, 0, 3, 2)
++DEF(ID_PFR2_EL1, 3, 0, 0, 3, 4)
++DEF(ID_DFR1_EL1, 3, 0, 0, 3, 5)
++DEF(ID_MMFR5_EL1, 3, 0, 0, 3, 6)
++DEF(ID_AA64ZFR0_EL1, 3, 0, 0, 4, 4)
++DEF(CTR_EL0, 3, 3, 0, 0, 1)
+\ No newline at end of file
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index a5ba7f2a26..2c1a3abeb0 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -26,7 +26,7 @@
+ #include "cpu-qom.h"
+ #include "exec/cpu-defs.h"
+ #include "qapi/qapi-types-common.h"
+-
++#include "target/arm/cpu-sysregs.h"
+ /* ARM processors have a weak memory model */
+ #define TCG_GUEST_DEFAULT_MO      (0)
+ 
+@@ -845,6 +845,53 @@ typedef struct {
+     uint32_t map, init, supported;
+ } ARMVQMap;
+ 
++/* REG is ID_XXX */
++#define FIELD_DP64_IDREG(ISAR, REG, FIELD, VALUE)                       \
++    ({                                                                  \
++        ARMISARegisters *i_ = (ISAR);                                   \
++        uint64_t regval = i_->idregs[REG ## _EL1_IDX];                  \
++        regval = FIELD_DP64(regval, REG, FIELD, VALUE);                 \
++        i_->idregs[REG ## _EL1_IDX] = regval;                           \
++    })
++
++#define FIELD_DP32_IDREG(ISAR, REG, FIELD, VALUE)                       \
++    ({                                                                  \
++        ARMISARegisters *i_ = (ISAR);                                   \
++        uint64_t regval = i_->idregs[REG ## _EL1_IDX];                  \
++        regval = FIELD_DP32(regval, REG, FIELD, VALUE);                 \
++        i_->idregs[REG ## _EL1_IDX] = regval;                           \
++    })
++
++#define FIELD_EX64_IDREG(ISAR, REG, FIELD)                              \
++    ({                                                                  \
++        const ARMISARegisters *i_ = (ISAR);                             \
++        FIELD_EX64(i_->idregs[REG ## _EL1_IDX], REG, FIELD);            \
++    })
++
++#define FIELD_EX32_IDREG(ISAR, REG, FIELD)                              \
++    ({                                                                  \
++        const ARMISARegisters *i_ = (ISAR);                             \
++        FIELD_EX32(i_->idregs[REG ## _EL1_IDX], REG, FIELD);            \
++    })
++
++#define FIELD_SEX64_IDREG(ISAR, REG, FIELD)                             \
++    ({                                                                  \
++        const ARMISARegisters *i_ = (ISAR);                             \
++        FIELD_SEX64(i_->idregs[REG ## _EL1_IDX], REG, FIELD);           \
++    })
++
++#define SET_IDREG(ISAR, REG, VALUE)                                     \
++    ({                                                                  \
++        ARMISARegisters *i_ = (ISAR);                                   \
++        i_->idregs[REG ## _EL1_IDX] = VALUE;                            \
++    })
++
++#define GET_IDREG(ISAR, REG)                                            \
++    ({                                                                  \
++        const ARMISARegisters *i_ = (ISAR);                             \
++        i_->idregs[REG ## _EL1_IDX];                                    \
++    })
++
+ /**
+  * ARMCPU:
+  * @env: #CPUARMState
+@@ -1044,6 +1091,7 @@ struct ArchCPU {
+         uint64_t id_aa64zfr0;
+         uint64_t id_aa64smfr0;
+         uint64_t reset_pmcr_el0;
++        uint64_t idregs[NUM_ID_IDX];
+     } isar;
+     uint64_t midr;
+     uint32_t revidr;
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 6eca55ac29..6700fbc117 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -35,6 +35,28 @@
+ #include "cpu-features.h"
+ #include "cpregs.h"
+ 
++/* convert between <register>_IDX and SYS_<register> */
++#define DEF(NAME, OP0, OP1, CRN, CRM, OP2)      \
++    [NAME##_IDX] = SYS_##NAME,
++
++const uint32_t id_register_sysreg[NUM_ID_IDX] = {
++#include "cpu-sysregs.h.inc"
++};
++
++#undef DEF
++#define DEF(NAME, OP0, OP1, CRN, CRM, OP2) \
++    case SYS_##NAME: return NAME##_IDX;
++
++int get_sysreg_idx(ARMSysRegs sysreg)
++{
++    switch (sysreg) {
++#include "cpu-sysregs.h.inc"
++    }
++    g_assert_not_reached();
++}
++
++#undef DEF
++
+ void arm_cpu_sve_finalize(ARMCPU *cpu, Error **errp)
+ {
+     /*
+-- 
+2.43.0
+

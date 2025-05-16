@@ -1,0 +1,163 @@
+From f5a75932f686cae4d188260dcbe939f38eb6f7a6 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:44:01 +0800
+Subject: [PATCH 13/28] arm/cpu: Add infra to handle generated ID register
+ definitions
+
+---
+ target/arm/cpu-custom.h            | 60 ++++++++++++++++++++++++++++++
+ target/arm/cpu-sysreg-properties.c | 41 ++++++++++++++++++++
+ target/arm/cpu64.c                 |  2 +
+ target/arm/meson.build             |  1 +
+ 4 files changed, 104 insertions(+)
+ create mode 100644 target/arm/cpu-custom.h
+ create mode 100644 target/arm/cpu-sysreg-properties.c
+
+diff --git a/target/arm/cpu-custom.h b/target/arm/cpu-custom.h
+new file mode 100644
+index 0000000000..615347376e
+--- /dev/null
++++ b/target/arm/cpu-custom.h
+@@ -0,0 +1,60 @@
++/*
++ * handle ID registers and their fields
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef ARM_CPU_CUSTOM_H
++#define ARM_CPU_CUSTOM_H
++
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "cpu.h"
++#include "cpu-sysregs.h"
++
++typedef struct ARM64SysRegField {
++    const char *name; /* name of the field, for instance CTR_EL0_IDC */
++    int index;
++    int lower;
++    int upper;
++} ARM64SysRegField;
++
++typedef struct ARM64SysReg {
++    const char *name;   /* name of the sysreg, for instance CTR_EL0 */
++    ARMSysRegs sysreg;
++    int index;
++    GList *fields; /* list of named fields, excluding RES* */
++} ARM64SysReg;
++
++void initialize_cpu_sysreg_properties(void);
++
++/*
++ * List of exposed ID regs (automatically populated from linux
++ * arch/arm64/tools/sysreg)
++ */
++extern ARM64SysReg arm64_id_regs[NUM_ID_IDX];
++
++/* Allocate a new field and insert it at the head of the @reg list */
++static inline GList *arm64_sysreg_add_field(ARM64SysReg *reg, const char *name,
++                                     uint8_t min, uint8_t max) {
++
++     ARM64SysRegField *field = g_new0(ARM64SysRegField, 1);
++
++     field->name = name;
++     field->lower = min;
++     field->upper = max;
++     field->index = reg->index;
++
++     reg->fields = g_list_append(reg->fields, field);
++     return reg->fields;
++}
++
++static inline ARM64SysReg *arm64_sysreg_get(ARMIDRegisterIdx index)
++{
++        ARM64SysReg *reg = &arm64_id_regs[index];
++
++        reg->index = index;
++        reg->sysreg = id_register_sysreg[index];
++        return reg;
++}
++
++#endif
+diff --git a/target/arm/cpu-sysreg-properties.c b/target/arm/cpu-sysreg-properties.c
+new file mode 100644
+index 0000000000..8b7ef5badf
+--- /dev/null
++++ b/target/arm/cpu-sysreg-properties.c
+@@ -0,0 +1,41 @@
++/*
++ * QEMU ARM CPU SYSREG PROPERTIES
++ * to be generated from linux sysreg
++ *
++ * Copyright (c) Red Hat, Inc. 2024
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see
++ * <http://www.gnu.org/licenses/gpl-2.0.html>
++ */
++
++#include "cpu-custom.h"
++
++ARM64SysReg arm64_id_regs[NUM_ID_IDX];
++
++void initialize_cpu_sysreg_properties(void)
++{
++    memset(arm64_id_regs, 0, sizeof(ARM64SysReg) * NUM_ID_IDX);
++    /* CTR_EL0 */
++    ARM64SysReg *CTR_EL0 = arm64_sysreg_get(CTR_EL0_IDX);
++    CTR_EL0->name = "CTR_EL0";
++    arm64_sysreg_add_field(CTR_EL0, "TminLine", 32, 37);
++    arm64_sysreg_add_field(CTR_EL0, "DIC", 29, 29);
++    arm64_sysreg_add_field(CTR_EL0, "IDC", 28, 28);
++    arm64_sysreg_add_field(CTR_EL0, "CWG", 24, 27);
++    arm64_sysreg_add_field(CTR_EL0, "ERG", 20, 23);
++    arm64_sysreg_add_field(CTR_EL0, "DminLine", 16, 19);
++    arm64_sysreg_add_field(CTR_EL0, "L1Ip", 14, 15);
++    arm64_sysreg_add_field(CTR_EL0, "IminLine", 0, 3);
++}
++
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 41a1b04050..7765b567e1 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -34,6 +34,7 @@
+ #include "internals.h"
+ #include "cpu-features.h"
+ #include "cpregs.h"
++#include "cpu-custom.h"
+ 
+ /* convert between <register>_IDX and SYS_<register> */
+ #define DEF(NAME, OP0, OP1, CRN, CRM, OP2)      \
+@@ -952,6 +953,7 @@ static void aarch64_cpu_register_types(void)
+ {
+     size_t i;
+ 
++    initialize_cpu_sysreg_properties();
+     type_register_static(&aarch64_cpu_type_info);
+ 
+     for (i = 0; i < ARRAY_SIZE(aarch64_cpus); ++i) {
+diff --git a/target/arm/meson.build b/target/arm/meson.build
+index 389ee54658..9060294a5f 100644
+--- a/target/arm/meson.build
++++ b/target/arm/meson.build
+@@ -15,6 +15,7 @@ arm_ss.add(when: 'CONFIG_KVM', if_true: files('kvm.c', 'kvm64.c', 'kvm-tmm.c'),
+ arm_ss.add(when: 'TARGET_AARCH64', if_true: files(
+   'cpu64.c',
+   'gdbstub64.c',
++  'cpu-sysreg-properties.c',
+ ))
+ 
+ arm_system_ss = ss.source_set()
+-- 
+2.43.0
+

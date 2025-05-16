@@ -1,0 +1,124 @@
+From e4657c27ef2c4d68fe4d894724939fd6526e8ac4 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:48:36 +0800
+Subject: [PATCH 19/28] arm/kvm: write back modified ID regs to KVM
+
+---
+ target/arm/kvm.c        |  2 +-
+ target/arm/kvm64.c      | 44 ++++++++++++++++++++++++++++++++++++++++-
+ target/arm/kvm_arm.h    |  7 +++++++
+ target/arm/trace-events |  1 +
+ 4 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 7762c6c216..3b6ccf7ca4 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -513,7 +513,7 @@ static int compare_u64(const void *a, const void *b)
+  * (see kvm_arm_init_cpreg_list). This allows us to cheaply find
+  * the storage for a KVM register by ID with a binary search.
+  */
+-static uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
++uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
+ {
+     uint64_t *res;
+ 
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index 099045c2be..8173dea90e 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -657,6 +657,39 @@ static int kvm_arm_sve_set_vls(CPUState *cs)
+     return kvm_set_one_reg(cs, KVM_REG_ARM64_SVE_VLS, &vls[0]);
+ }
+ 
++static void kvm_arm_writable_idregs_to_cpreg_list(ARMCPU *cpu)
++{
++    if (!cpu->writable_map) {
++        return;
++    }
++    for (int i = 0; i < NR_ID_REGS; i++) {
++        uint64_t writable_mask = cpu->writable_map->regs[i];
++        uint64_t *cpreg;
++
++        if (writable_mask) {
++            uint64_t previous, new;
++            int idx = kvm_idx_to_idregs_idx(i);
++            ARM64SysReg *sysregdesc;
++            uint32_t sysreg;
++
++            if (idx == -1) {
++                /* sysreg writable, but we don't know it */
++                continue;
++            }
++            sysregdesc = &arm64_id_regs[idx];
++            sysreg = sysregdesc->sysreg;
++            cpreg = kvm_arm_get_cpreg_ptr(cpu, idregs_sysreg_to_kvm_reg(sysreg));
++            previous = *cpreg;
++            new = cpu->isar.idregs[idx];
++            if (previous != new) {
++                *cpreg = new;
++                trace_kvm_arm_writable_idregs_to_cpreg_list(sysregdesc->name,
++                                                            previous, new);
++            }
++        }
++    }
++}
++
+ #define ARM_CPU_ID_MPIDR       3, 0, 0, 0, 5
+ 
+ int kvm_arch_init_vcpu(CPUState *cs)
+@@ -752,7 +785,16 @@ int kvm_arch_init_vcpu(CPUState *cs)
+     /* Check whether user space can specify guest syndrome value */
+     kvm_arm_init_serror_injection(cs);
+ 
+-    return kvm_arm_init_cpreg_list(cpu);
++    ret = kvm_arm_init_cpreg_list(cpu);
++    if (ret) {
++        return ret;
++    }
++    /* overwrite writable ID regs with their updated property values */
++    kvm_arm_writable_idregs_to_cpreg_list(cpu);
++
++    write_list_to_kvmstate(cpu, 3);
++
++    return 0;
+ }
+ 
+ int kvm_arch_destroy_vcpu(CPUState *cs)
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index 08893c36c1..12646baa38 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -237,6 +237,8 @@ void kvm_arm_destroy_scratch_host_vcpu(int *fdarray);
+ 
+ int kvm_arm_get_writable_id_regs(ARMCPU *cpu, IdRegMap *idregmap);
+ 
++uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx);
++
+ /**
+  * ARMHostCPUFeatures: information about the host CPU (identified
+  * by asking the host kernel)
+@@ -496,6 +498,11 @@ static inline uint32_t kvm_arm_sve_get_vls(CPUState *cs)
+     g_assert_not_reached();
+ }
+ 
++static inline uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
++{
++    g_assert_not_reached();
++}
++
+ static inline int kvm_arm_set_smccc_filter(uint64_t func, uint8_t faction)
+ {
+     g_assert_not_reached();
+diff --git a/target/arm/trace-events b/target/arm/trace-events
+index bde0bc9d38..aa221f2922 100644
+--- a/target/arm/trace-events
++++ b/target/arm/trace-events
+@@ -14,3 +14,4 @@ arm_gt_update_irq(int timer, int irqstate) "gt_update_irq: timer %d irqstate %d"
+ kvm_arm_fixup_msi_route(uint64_t iova, uint64_t gpa) "MSI iova = 0x%"PRIx64" is translated into 0x%"PRIx64
+ # kvm64.c
+ get_host_cpu_idregs(const char *name, uint64_t value) "scratch vcpu host value for %s is 0x%"PRIx64
++kvm_arm_writable_idregs_to_cpreg_list(const char *name, uint64_t previous, uint64_t new) "%s overwrite default 0x%"PRIx64" with 0x%"PRIx64
+-- 
+2.43.0
+

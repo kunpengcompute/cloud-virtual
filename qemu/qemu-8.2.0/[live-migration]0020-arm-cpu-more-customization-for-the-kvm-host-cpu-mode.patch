@@ -1,0 +1,345 @@
+From ea335047dcaa1ec1e8589b6bfa3d82695f9f2f09 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 10:50:07 +0800
+Subject: [PATCH 20/28] arm/cpu: more customization for the kvm host cpu model
+
+---
+ target/arm/cpu.c        |  12 ++++
+ target/arm/cpu64.c      |  85 +++++++++++++++++++------
+ target/arm/kvm64.c      | 137 ++++++++++++++++++++++++++++++++++++++++
+ target/arm/kvm_arm.h    |  10 +++
+ target/arm/trace-events |   4 ++
+ 5 files changed, 228 insertions(+), 20 deletions(-)
+
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 797c70658c..3e4941aa47 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -1850,6 +1850,18 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
+         return;
+     }
+ 
++    /*
++     * If we failed to retrieve the set of writable ID registers for the "host"
++     * CPU model, report it here. No error if the interface for discovering
++     * writable ID registers is not available.
++     * In case we did get the set of writable ID registers, set the features to
++     * the configured values here and perform some sanity checks.
++     */
++    if (cpu->writable_id_regs == WRITABLE_ID_REGS_FAILED) {
++        error_setg(errp, "Failed to discover writable id registers");
++        return;
++    }
++
+ #ifndef CONFIG_USER_ONLY
+     /* The NVIC and M-profile CPU are two halves of a single piece of
+      * hardware; trying to use one without the other is a command line
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 70f95f1ef4..7d12b1ce01 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -778,34 +778,35 @@ static void aarch64_a72_initfn(Object *obj)
+     define_cortex_a72_a57_a53_cp_reginfo(cpu);
+ }
+ 
+-static void aarch64_kunpeng_920_initfn(Object *obj)
+-{
+-    ARMCPU *cpu = ARM_CPU(obj);
+-    ARMISARegisters *isar = &cpu->isar;
+-    /*
+-     * Hisilicon Kunpeng-920 CPU is similar to cortex-a72,
+-     * so first initialize cpu data as cortex-a72,
+-     * and then update the special register.
+-     */
+-    aarch64_a72_initfn(obj);
+-
+-    cpu->midr = 0x480fd010;
+-    cpu->ctr = 0x84448004;
+-    SET_IDREG(isar, ID_AA64PFR0, 0x11001111);
+-    SET_IDREG(isar, ID_AA64DFR0, 0x110305408);
+-    SET_IDREG(isar, ID_AA64ISAR0, 0x10211120);
+-    SET_IDREG(isar, ID_AA64MMFR0, 0x101125);
+-}
+-
+ static void aarch64_host_initfn(Object *obj)
+ {
+ #if defined(CONFIG_KVM)
+     ARMCPU *cpu = ARM_CPU(obj);
+-    kvm_arm_set_cpu_features_from_host(cpu, false);
++    bool expose_id_regs = true;
++    int ret;
++
++    cpu->writable_map = g_malloc(sizeof(IdRegMap));
++
++    /* discover via KVM_ARM_GET_REG_WRITABLE_MASKS */
++    ret = kvm_arm_get_writable_id_regs(cpu, cpu->writable_map);
++    if (ret == -ENOSYS) {
++        /* legacy: continue without writable id regs */
++        expose_id_regs = false;
++    } else if (ret) {
++        /* function will have marked an error */
++        return;
++    }
++
++    kvm_arm_set_cpu_features_from_host(cpu, expose_id_regs);
+     if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
+         aarch64_add_sve_properties(obj);
+         aarch64_add_pauth_properties(obj);
+     }
++    if (expose_id_regs) {
++        /* generate SYSREG properties according to writable masks */
++        kvm_arm_expose_idreg_properties(cpu, arm64_id_regs);
++    }
++
+ #elif defined(CONFIG_HVF)
+     ARMCPU *cpu = ARM_CPU(obj);
+     hvf_arm_set_cpu_features_from_host(cpu);
+@@ -815,6 +816,50 @@ static void aarch64_host_initfn(Object *obj)
+ #endif
+ }
+ 
++static void aarch64_kunpeng_920_initfn(Object *obj)
++{
++    ARMCPU *cpu = ARM_CPU(obj);
++    ARMISARegisters *isar = &cpu->isar;
++    /*
++     * Hisilicon Kunpeng-920 CPU is similar to cortex-a72,
++     * so first initialize cpu data as cortex-a72,
++     * and then update the special register.
++     */
++    aarch64_host_initfn(obj);
++
++    cpu->midr = 0x480fd010;
++    cpu->ctr = 0x84448004;
++    cpu->isar.mvfr0 = 0x0;
++    cpu->isar.mvfr1 = 0x0;
++    cpu->isar.mvfr2 = 0x0;
++    SET_IDREG(isar, ID_MMFR0, 0x0);
++    SET_IDREG(isar, ID_MMFR1, 0x0);
++    SET_IDREG(isar, ID_MMFR2, 0x0);
++    SET_IDREG(isar, ID_MMFR3, 0x0);
++    SET_IDREG(isar, ID_MMFR4, 0x0);
++    SET_IDREG(isar, ID_ISAR0, 0x0);
++    SET_IDREG(isar, ID_ISAR1, 0x0);
++    SET_IDREG(isar, ID_ISAR2, 0x0);
++    SET_IDREG(isar, ID_ISAR3, 0x0);
++    SET_IDREG(isar, ID_ISAR4, 0x0);
++    SET_IDREG(isar, ID_ISAR5, 0x0);
++    SET_IDREG(isar, ID_PFR0, 0x0);
++    SET_IDREG(isar, ID_PFR1, 0x0);
++    SET_IDREG(isar, ID_DFR0, 0x0);
++    SET_IDREG(isar, ID_AA64PFR0, 0x1100000011111111);
++    SET_IDREG(isar, ID_AA64PFR1, 0x20);
++    SET_IDREG(isar, ID_AA64DFR0, 0xf010305408);
++    SET_IDREG(isar, ID_AA64DFR1, 0x0);
++    SET_IDREG(isar, ID_AA64ISAR0, 0x1100010211120);
++    SET_IDREG(isar, ID_AA64ISAR1, 0x11001);
++    SET_IDREG(isar, ID_AA64ISAR2, 0x0);
++    SET_IDREG(isar, ID_AA64MMFR0, 0x101025);
++    SET_IDREG(isar, ID_AA64MMFR1, 0x10211122);
++    SET_IDREG(isar, ID_AA64MMFR2, 0x11);
++    SET_IDREG(isar, ID_AA64MMFR3, 0x0);
++    SET_IDREG(isar, ID_AA64ZFR0, 0x0);
++}
++
+ static void aarch64_max_initfn(Object *obj)
+ {
+     if (kvm_enabled() || hvf_enabled()) {
+diff --git a/target/arm/kvm64.c b/target/arm/kvm64.c
+index 8173dea90e..253dc0cb47 100644
+--- a/target/arm/kvm64.c
++++ b/target/arm/kvm64.c
+@@ -23,6 +23,7 @@
+ #include "qemu/error-report.h"
+ #include "qemu/host-utils.h"
+ #include "qemu/main-loop.h"
++#include "qom/object.h"
+ #include "exec/gdbstub.h"
+ #include "sysemu/runstate.h"
+ #include "sysemu/kvm.h"
+@@ -33,6 +34,7 @@
+ #include "cpu-features.h"
+ #include "hw/acpi/acpi.h"
+ #include "hw/acpi/ghes.h"
++#include "qapi/visitor.h"
+ #include "cpu-custom.h"
+ 
+ static bool have_guest_debug;
+@@ -339,6 +341,141 @@ static int get_host_cpu_idregs(ARMCPU *cpu, int fd, ARMHostCPUFeatures *ahcf)
+     return err;
+ }
+ 
++static ARM64SysRegField *get_field(int i, ARM64SysReg *reg)
++{
++    GList *l;
++
++    for (l = reg->fields; l; l = l->next) {
++        ARM64SysRegField *field = (ARM64SysRegField *)l->data;
++
++        if (i >= field->lower && i <= field->upper) {
++            return field;
++        }
++    }
++    return NULL;
++}
++
++static void set_sysreg_prop(Object *obj, Visitor *v,
++                            const char *name, void *opaque,
++                            Error **errp)
++{
++    ARM64SysRegField *field = (ARM64SysRegField *)opaque;
++    ARMCPU *cpu = ARM_CPU(obj);
++    uint64_t *idregs = cpu->isar.idregs;
++    uint64_t old, value, mask;
++    int lower = field->lower;
++    int upper = field->upper;
++    int length = upper - lower + 1;
++    int index = field->index;
++
++    if (!visit_type_uint64(v, name, &value, errp)) {
++        return;
++    }
++
++    if (length < 64 && value > ((1 << length) - 1)) {
++        error_setg(errp,
++                   "idreg %s set value (0x%lx) exceeds length of field (%d)!",
++                   name, value, length);
++        return;
++    }
++
++    mask = MAKE_64BIT_MASK(lower, length);
++    value = value << lower;
++    old = idregs[index];
++    idregs[index] = old & ~mask;
++    idregs[index] |= value;
++    trace_set_sysreg_prop(name, old, mask, value, idregs[index]);
++}
++
++static void get_sysreg_prop(Object *obj, Visitor *v,
++                            const char *name, void *opaque,
++                            Error **errp)
++{
++    ARM64SysRegField *field = (ARM64SysRegField *)opaque;
++    ARMCPU *cpu = ARM_CPU(obj);
++    uint64_t *idregs = cpu->isar.idregs;
++    uint64_t value, mask;
++    int lower = field->lower;
++    int upper = field->upper;
++    int length = upper - lower + 1;
++    int index = field->index;
++
++    mask = MAKE_64BIT_MASK(lower, length);
++    value = (idregs[index] & mask) >> lower;
++    visit_type_uint64(v, name, &value, errp);
++    trace_get_sysreg_prop(name, value);
++}
++
++/*
++ * decode_idreg_writemap: Generate props for writable fields
++ *
++ * @obj: CPU object
++ * @index: index of the sysreg
++ * @map: writable map for the sysreg
++ * @reg: description of the sysreg
++ */
++static int
++decode_idreg_writemap(Object *obj, int index, uint64_t map, ARM64SysReg *reg)
++{
++    int i = ctz64(map);
++    int nb_sysreg_props = 0;
++
++    while (map) {
++
++        ARM64SysRegField *field = get_field(i, reg);
++        int lower, upper;
++        uint64_t mask;
++        char *prop_name;
++
++        if (!field) {
++            /* the field cannot be matched to any know id named field */
++            warn_report("%s bit %d of %s is writable but cannot be matched",
++                        __func__, i, reg->name);
++            warn_report("%s is cpu-sysreg-properties.c up to date?", __func__);
++            map =  map & ~BIT_ULL(i);
++            i = ctz64(map);
++            continue;
++        }
++        lower = field->lower;
++        upper = field->upper;
++        prop_name = g_strdup_printf("SYSREG_%s_%s", reg->name, field->name);
++        trace_decode_idreg_writemap(field->name, lower, upper, prop_name);
++        object_property_add(obj, prop_name, "uint64",
++                            get_sysreg_prop, set_sysreg_prop, NULL, field);
++        nb_sysreg_props++;
++
++        mask = MAKE_64BIT_MASK(lower, upper - lower + 1);
++        map = map & ~mask;
++        i = ctz64(map);
++    }
++    trace_nb_sysreg_props(reg->name, nb_sysreg_props);
++    return 0;
++}
++
++/* analyze the writable mask and generate properties for writable fields */
++void kvm_arm_expose_idreg_properties(ARMCPU *cpu, ARM64SysReg *regs)
++{
++    int i, idx;
++    IdRegMap *map = cpu->writable_map;
++    Object *obj = OBJECT(cpu);
++
++    for (i = 0; i < NR_ID_REGS; i++) {
++        uint64_t mask = map->regs[i];
++
++        if (mask) {
++            /* reg @i has some writable fields, decode them */
++            idx = kvm_idx_to_idregs_idx(i);
++            if (idx < 0) {
++                /* no matching reg? */
++                warn_report("%s: reg %d writable, but not in list of idregs?",
++                            __func__, i);
++            } else {
++                decode_idreg_writemap(obj, i, mask, &regs[idx]);
++            }
++        }
++    }
++}
++
+ bool kvm_arm_get_host_cpu_features(ARMCPU *cpu, ARMHostCPUFeatures *ahcf,
+                                    bool exhaustive)
+ {
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index 12646baa38..baf9cbed0c 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -295,6 +295,16 @@ void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu, bool exhaustive);
+  */
+ void kvm_arm_add_vcpu_properties(Object *obj);
+ 
++typedef struct ARM64SysReg ARM64SysReg;
++/**
++ * kvm_arm_expose_idreg_properties:
++ * @cpu: The CPU object to generate the properties for
++ * @reg: registers from the host
++ *
++ * analyze the writable mask and generate properties for writable fields
++ */
++void kvm_arm_expose_idreg_properties(ARMCPU *cpu, ARM64SysReg *regs);
++
+ /**
+  * kvm_arm_steal_time_finalize:
+  * @cpu: ARMCPU for which to finalize kvm-steal-time
+diff --git a/target/arm/trace-events b/target/arm/trace-events
+index aa221f2922..5784931028 100644
+--- a/target/arm/trace-events
++++ b/target/arm/trace-events
+@@ -15,3 +15,7 @@ kvm_arm_fixup_msi_route(uint64_t iova, uint64_t gpa) "MSI iova = 0x%"PRIx64" is
+ # kvm64.c
+ get_host_cpu_idregs(const char *name, uint64_t value) "scratch vcpu host value for %s is 0x%"PRIx64
+ kvm_arm_writable_idregs_to_cpreg_list(const char *name, uint64_t previous, uint64_t new) "%s overwrite default 0x%"PRIx64" with 0x%"PRIx64
++decode_idreg_writemap(const char* name, int lower, int upper, char *prop_name) "%s [%d:%d] is writable (prop %s)"
++get_sysreg_prop(const char *name, uint64_t value) "%s 0x%"PRIx64
++set_sysreg_prop(const char *name, uint64_t old, uint64_t mask, uint64_t field_value, uint64_t new) "%s old reg value=0x%"PRIx64" mask=0x%"PRIx64" new field value=0x%"PRIx64" new reg value=0x%"PRIx64
++nb_sysreg_props(const char *name, int count) "%s: %d SYSREG properties"
+-- 
+2.43.0
+
