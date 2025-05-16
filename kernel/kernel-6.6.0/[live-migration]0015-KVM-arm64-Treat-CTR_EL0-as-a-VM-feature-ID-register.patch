@@ -1,0 +1,88 @@
+From 9ea154d9e9bb6f72c058cbedf7911d3df12656a0 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:54:33 +0800
+Subject: [PATCH 15/32] KVM: arm64: Treat CTR_EL0 as a VM feature ID register
+
+---
+ arch/arm64/include/asm/kvm_host.h |  4 ++++
+ arch/arm64/kvm/sys_regs.c         | 16 +++++++---------
+ 2 files changed, 11 insertions(+), 9 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index ba113ec5980f..fbc5c9949a1b 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -287,6 +287,8 @@ struct kvm_arch {
+ #define KVM_ARM_ID_REG_NUM	(IDREG_IDX(sys_reg(3, 0, 0, 7, 7)) + 1)
+ 	u64 id_regs[KVM_ARM_ID_REG_NUM];
+ 
++	u64 ctr_el0;
++
+ 	/*
+ 	 * For an untrusted host VM, 'pkvm.handle' is used to lookup
+ 	 * the associated pKVM instance in the hypervisor.
+@@ -1302,6 +1304,8 @@ static inline u64 *__vm_id_reg(struct kvm_arch *ka, u32 reg)
+ 	switch (reg) {
+ 	case sys_reg(3, 0, 0, 1, 0) ... sys_reg(3, 0, 0, 7, 7):
+ 		return &ka->id_regs[IDREG_IDX(reg)];
++	case SYS_CTR_EL0:
++		return &ka->ctr_el0;
+ 	default:
+ 		WARN_ON_ONCE(1);
+ 		return NULL;
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 9fa1e88fb6a4..d1455db6d77f 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1528,6 +1528,8 @@ static bool is_feature_id_reg(u32 encoding)
+  */
+ static inline bool is_vm_ftr_id_reg(u32 id)
+ {
++	if (id == SYS_CTR_EL0)
++		return true;
+ 	return (sys_reg_Op0(id) == 3 && sys_reg_Op1(id) == 0 &&
+ 		sys_reg_CRn(id) == 0 && sys_reg_CRm(id) >= 1 &&
+ 		sys_reg_CRm(id) < 8);
+@@ -1869,7 +1871,7 @@ static bool access_ctr(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	if (p->is_write)
+ 		return write_to_read_only(vcpu, p, r);
+ 
+-	p->regval = read_sanitised_ftr_reg(SYS_CTR_EL0);
++		p->regval = kvm_read_vm_id_reg(vcpu->kvm, SYS_CTR_EL0);
+ 	return true;
+ }
+ 
+@@ -2490,7 +2492,10 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_CCSIDR2_EL1), undef_access },
+ 	{ SYS_DESC(SYS_SMIDR_EL1), undef_access },
+ 	{ SYS_DESC(SYS_CSSELR_EL1), access_csselr, reset_unknown, CSSELR_EL1 },
+-	{ SYS_DESC(SYS_CTR_EL0), access_ctr },
++	ID_WRITABLE(CTR_EL0, CTR_EL0_DIC_MASK |
++					     CTR_EL0_IDC_MASK |
++					     CTR_EL0_DminLine_MASK |
++					     CTR_EL0_IminLine_MASK),
+ 	{ SYS_DESC(SYS_SVCR), undef_access },
+ 
+ 	{ PMU_SYS_REG(PMCR_EL0), .access = access_pmcr, .reset = reset_pmcr,
+@@ -3723,18 +3728,11 @@ FUNCTION_INVARIANT(midr_el1)
+ FUNCTION_INVARIANT(revidr_el1)
+ FUNCTION_INVARIANT(aidr_el1)
+ 
+-static u64 get_ctr_el0(struct kvm_vcpu *v, const struct sys_reg_desc *r)
+-{
+-	((struct sys_reg_desc *)r)->val = read_sanitised_ftr_reg(SYS_CTR_EL0);
+-	return ((struct sys_reg_desc *)r)->val;
+-}
+-
+ /* ->val is filled in by kvm_sys_reg_table_init() */
+ static struct sys_reg_desc invariant_sys_regs[] __ro_after_init = {
+ 	{ SYS_DESC(SYS_MIDR_EL1), NULL, get_midr_el1 },
+ 	{ SYS_DESC(SYS_REVIDR_EL1), NULL, get_revidr_el1 },
+ 	{ SYS_DESC(SYS_AIDR_EL1), NULL, get_aidr_el1 },
+-	{ SYS_DESC(SYS_CTR_EL0), NULL, get_ctr_el0 },
+ };
+ 
+ static int get_invariant_sys_reg(u64 id, u64 __user *uaddr)
+-- 
+2.43.0
+

@@ -1,0 +1,133 @@
+From 2705e8a1423d6dc4df08694442941752f867ca1f Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:51:21 +0800
+Subject: [PATCH 11/32] KVM: arm64: Add debugfs file for guest's ID registers
+
+---
+ arch/arm64/include/asm/kvm_host.h |  3 ++
+ arch/arm64/kvm/sys_regs.c         | 81 +++++++++++++++++++++++++++++++
+ 2 files changed, 84 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 702ac45c9f23..e603a8a6577c 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -267,6 +267,9 @@ struct kvm_arch {
+ 	/* PMCR_EL0.N value for the guest */
+ 	u8 pmcr_n;
+ 
++	/* Iterator for idreg debugfs */
++	u8 idreg_debugfs_iter;
++
+ 	/* Hypercall features firmware registers' descriptor */
+ 	struct kvm_smccc_features smccc_feat;
+ 	struct maple_tree smccc_filter;
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 5d3d6dc393c5..c2b804fb38a1 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -12,6 +12,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/bsearch.h>
+ #include <linux/cacheinfo.h>
++#include <linux/debugfs.h>
+ #include <linux/kvm_host.h>
+ #include <linux/mm.h>
+ #include <linux/printk.h>
+@@ -3433,6 +3434,81 @@ static bool emulate_sys_reg(struct kvm_vcpu *vcpu,
+ 	return false;
+ }
+ 
++static void *idregs_debug_start(struct seq_file *s, loff_t *pos)
++{
++	struct kvm *kvm = s->private;
++	u8 *iter;
++
++	mutex_lock(&kvm->arch.config_lock);
++
++	iter = &kvm->arch.idreg_debugfs_iter;
++	if (*iter == (u8)~0) {
++		*iter = *pos;
++		if (*iter >= KVM_ARM_ID_REG_NUM)
++			iter = NULL;
++	} else {
++		iter = ERR_PTR(-EBUSY);
++	}
++
++	mutex_unlock(&kvm->arch.config_lock);
++
++	return iter;
++}
++
++static void *idregs_debug_next(struct seq_file *s, void *v, loff_t *pos)
++{
++	struct kvm *kvm = s->private;
++
++	(*pos)++;
++
++	if ((kvm->arch.idreg_debugfs_iter + 1) < KVM_ARM_ID_REG_NUM) {
++		kvm->arch.idreg_debugfs_iter++;
++
++		return &kvm->arch.idreg_debugfs_iter;
++	}
++
++	return NULL;
++}
++
++static void idregs_debug_stop(struct seq_file *s, void *v)
++{
++	struct kvm *kvm = s->private;
++
++	if (IS_ERR(v))
++		return;
++
++	mutex_lock(&kvm->arch.config_lock);
++
++	kvm->arch.idreg_debugfs_iter = ~0;
++
++	mutex_unlock(&kvm->arch.config_lock);
++}
++
++static int idregs_debug_show(struct seq_file *s, void *v)
++{
++	struct kvm *kvm = s->private;
++	const struct sys_reg_desc *desc;
++
++	desc = first_idreg + kvm->arch.idreg_debugfs_iter;
++
++	if (!desc->name)
++		return 0;
++
++	seq_printf(s, "%20s:\t%016llx\n",
++			desc->name, IDREG(kvm, reg_to_encoding(desc)));
++
++	return 0;
++}
++
++static const struct seq_operations idregs_debug_sops = {
++	.start	= idregs_debug_start,
++	.next	= idregs_debug_next,
++	.stop	= idregs_debug_stop,
++	.show	= idregs_debug_show,
++};
++
++DEFINE_SEQ_ATTRIBUTE(idregs_debug);
++
+ static void kvm_reset_id_regs(struct kvm_vcpu *vcpu)
+ {
+ 	const struct sys_reg_desc *idreg = first_idreg;
+@@ -3452,6 +3528,11 @@ static void kvm_reset_id_regs(struct kvm_vcpu *vcpu)
+ 		id = reg_to_encoding(idreg);
+ 	}
+ 
++	kvm->arch.idreg_debugfs_iter = ~0;
++
++	debugfs_create_file("idregs", 0444, kvm->debugfs_dentry, kvm,
++			    &idregs_debug_fops);
++
+ 	set_bit(KVM_ARCH_FLAG_ID_REGS_INITIALIZED, &kvm->arch.flags);
+ }
+ 
+-- 
+2.43.0
+
