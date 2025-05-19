@@ -1,0 +1,98 @@
+From a104aaa5c2109a1b726dcf6aa306cd498f0dd724 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:14:23 +0800
+Subject: [PATCH 35/50] KVM: arm64: Make L1Ip feature in CTR_EL0 writable from
+ userspace
+
+---
+ arch/arm64/kvm/sys_regs.c | 44 ++++++++++++++++++++++++++++++++-------
+ 1 file changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index cd25af7916ea..2300ae3eae36 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1817,6 +1817,34 @@ static int set_id_aa64pfr1_el1(struct kvm_vcpu *vcpu,
+ 	return set_id_reg(vcpu, rd, val);
+ }
+ 
++static int set_ctr_el0(struct kvm_vcpu *vcpu,
++		       const struct sys_reg_desc *rd, u64 user_val)
++{
++	u8 user_L1Ip = SYS_FIELD_GET(CTR_EL0, L1Ip, user_val);
++
++	/*
++	 * Both AIVIVT (0b01) and VPIPT (0b00) are documented as reserved.
++	 * Hence only allow to set VIPT(0b10) or PIPT(0b11) for L1Ip based
++	 * on what hardware reports.
++	 *
++	 * Using a VIPT software model on PIPT will lead to over invalidation,
++	 * but still correct. Hence, we can allow downgrading PIPT to VIPT,
++	 * but not the other way around. This is handled via arm64_ftr_safe_value()
++	 * as CTR_EL0 ftr_bits has L1Ip field with type FTR_EXACT and safe value
++	 * set as VIPT.
++	 */
++	switch (user_L1Ip) {
++	case CTR_EL0_L1Ip_RESERVED_VPIPT:
++	case CTR_EL0_L1Ip_RESERVED_AIVIVT:
++		return -EINVAL;
++	case CTR_EL0_L1Ip_VIPT:
++	case CTR_EL0_L1Ip_PIPT:
++		return set_id_reg(vcpu, rd, user_val);
++	default:
++		return -ENOENT;
++	}
++}
++
+ /*
+  * cpufeature ID register user accessors
+  *
+@@ -2468,10 +2496,10 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_SPSR_EL1), access_spsr},
+ 	{ SYS_DESC(SYS_ELR_EL1), access_elr},
+ 
+-	{ SYS_DESC(SYS_ICC_PMR_EL1), undef_access },
+-
+ 	{ SYS_DESC(SYS_ALLINT), undef_access },
+ 
++	{ SYS_DESC(SYS_ICC_PMR_EL1), undef_access },
++
+ 	{ SYS_DESC(SYS_AFSR0_EL1), access_vm_reg, reset_unknown, AFSR0_EL1 },
+ 	{ SYS_DESC(SYS_AFSR1_EL1), access_vm_reg, reset_unknown, AFSR1_EL1 },
+ 	{ SYS_DESC(SYS_ESR_EL1), access_vm_reg, reset_unknown, ESR_EL1 },
+@@ -2532,7 +2560,6 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_ICC_IAR0_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_EOIR0_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_HPPIR0_EL1), undef_access },
+-	{ SYS_DESC(SYS_ICC_NMIAR1_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_BPR0_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_AP0R0_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_AP0R1_EL1), undef_access },
+@@ -2542,6 +2569,7 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_ICC_AP1R1_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_AP1R2_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_AP1R3_EL1), undef_access },
++	{ SYS_DESC(SYS_ICC_NMIAR1_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_DIR_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_RPR_EL1), undef_access },
+ 	{ SYS_DESC(SYS_ICC_SGI1R_EL1), access_gic_sgi },
+@@ -2571,10 +2599,12 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_CCSIDR2_EL1), undef_access },
+ 	{ SYS_DESC(SYS_SMIDR_EL1), undef_access },
+ 	{ SYS_DESC(SYS_CSSELR_EL1), access_csselr, reset_unknown, CSSELR_EL1 },
+-	ID_WRITABLE(CTR_EL0, CTR_EL0_DIC_MASK |
+-					     CTR_EL0_IDC_MASK |
+-					     CTR_EL0_DminLine_MASK |
+-					     CTR_EL0_IminLine_MASK),
++	ID_FILTERED(CTR_EL0, ctr_el0,
++			    CTR_EL0_DIC_MASK |
++			    CTR_EL0_IDC_MASK |
++			    CTR_EL0_DminLine_MASK |
++			    CTR_EL0_L1Ip_MASK |
++			    CTR_EL0_IminLine_MASK),
+ 	{ SYS_DESC(SYS_SVCR), undef_access },
+ 
+ 	{ PMU_SYS_REG(PMCR_EL0), .access = access_pmcr, .reset = reset_pmcr,
+-- 
+2.43.0
+
