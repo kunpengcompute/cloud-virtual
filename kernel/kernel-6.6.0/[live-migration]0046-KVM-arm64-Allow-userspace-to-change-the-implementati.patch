@@ -1,0 +1,225 @@
+From 125ead529a2c05bce69e739d906ab562479d7263 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:19:29 +0800
+Subject: [PATCH 46/50] KVM: arm64: Allow userspace to change the
+ implementation ID registers
+
+---
+ Documentation/virt/kvm/api.rst             | 18 +++++++++
+ arch/arm64/include/asm/kvm_host.h          |  2 +
+ arch/arm64/kvm/arm.c                       |  9 +++++
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h | 23 ++++++++++-
+ arch/arm64/kvm/sys_regs.c                  | 46 +++++++++++++++++++---
+ include/uapi/linux/kvm.h                   |  2 +
+ 6 files changed, 94 insertions(+), 6 deletions(-)
+
+diff --git a/Documentation/virt/kvm/api.rst b/Documentation/virt/kvm/api.rst
+index 4d9e3bef059c..4452a219cbdf 100644
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@ -7846,6 +7846,24 @@ This capability is aimed to mitigate the threat that malicious VMs can
+ cause CPU stuck (due to event windows don't open up) and make the CPU
+ unavailable to host or other VMs.
+ 
++7.34 KVM_CAP_ARM_WRITABLE_IMP_ID_REGS
++-------------------------------------
++
++:Architectures: arm64
++:Target: VM
++:Parameters: None
++:Returns: 0 on success, -EBUSY if vCPUs have been created before enabling this
++          capability.
++
++This capability changes the behavior of the registers that identify a PE
++implementation of the Arm architecture: MIDR_EL1, REVIDR_EL1, and AIDR_EL1.
++By default, these registers are visible to userspace but treated as invariant.
++
++When this capability is enabled, KVM allows userspace to change the
++aforementioned registers before the first KVM_RUN. These registers are VM
++scoped, meaning that the same set of values are presented on all vCPUs in a
++given VM.
++
+ 8. Other capabilities.
+ ======================
+ 
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 00aae0750f1d..48c1ce6bd53e 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -251,6 +251,8 @@ struct kvm_arch {
+ #define KVM_ARCH_FLAG_SMCCC_FILTER_CONFIGURED		7
+ 	/* Initial ID reg values loaded */
+ #define KVM_ARCH_FLAG_ID_REGS_INITIALIZED		8
++	/* MIDR_EL1, REVIDR_EL1, and AIDR_EL1 are writable from userspace */
++#define KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS		9
+ 	unsigned long flags;
+ 
+ 	/* VM-wide vCPU feature set */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index f7483b314ced..2f918a6fbfef 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -179,6 +179,14 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		}
+ 		mutex_unlock(&kvm->slots_lock);
+ 		break;
++	case KVM_CAP_ARM_WRITABLE_IMP_ID_REGS:
++		mutex_lock(&kvm->lock);
++		if (!kvm->created_vcpus) {
++			r = 0;
++			set_bit(KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS, &kvm->arch.flags);
++		}
++		mutex_unlock(&kvm->lock);
++		break;
+ #ifdef CONFIG_HISI_VIRTCCA_HOST
+ 	case KVM_CAP_ARM_TMM:
+ 		r = 0;
+@@ -348,6 +356,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 	case KVM_CAP_ARM_SYSTEM_SUSPEND:
+ 	case KVM_CAP_IRQFD_RESAMPLE:
+ 	case KVM_CAP_COUNTER_OFFSET:
++	case KVM_CAP_ARM_WRITABLE_IMP_ID_REGS:
+ 		r = 1;
+ 		break;
+ 	case KVM_CAP_SET_GUEST_DEBUG2:
+diff --git a/arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h b/arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h
+index 477d784507a0..ddd1d2308e66 100644
+--- a/arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h
++++ b/arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h
+@@ -17,9 +17,30 @@
+ #include <asm/kvm_mmu.h>
+ #include <asm/mpam.h>
+ 
++static inline struct kvm_vcpu *ctxt_to_vcpu(struct kvm_cpu_context *ctxt)
++{
++	struct kvm_vcpu *vcpu = ctxt->__hyp_running_vcpu;
++
++	if (!vcpu)
++		vcpu = container_of(ctxt, struct kvm_vcpu, arch.ctxt);
++
++	return vcpu;
++}
++
++static inline bool ctxt_is_guest(struct kvm_cpu_context *ctxt)
++{
++	return host_data_ptr(host_ctxt) != ctxt;
++}
++
+ static inline u64 ctxt_midr_el1(struct kvm_cpu_context *ctxt)
+ {
+-	return read_cpuid_id();
++	struct kvm *kvm = kern_hyp_va(ctxt_to_vcpu(ctxt)->kvm);
++
++	if (!(ctxt_is_guest(ctxt) &&
++	      test_bit(KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS, &kvm->arch.flags)))
++		return read_cpuid_id();
++
++	return kvm_read_vm_id_reg(kvm, SYS_MIDR_EL1);
+ }
+ 
+ static inline void __sysreg_save_common_state(struct kvm_cpu_context *ctxt)
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 9534eda5f1d4..fadf1a9b95d2 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -2257,6 +2257,17 @@ static bool access_imp_id_reg(struct kvm_vcpu *vcpu,
+ 	if (p->is_write)
+ 		return write_to_read_only(vcpu, p, r);
+ 
++	/*
++	 * Return the VM-scoped implementation ID register values if userspace
++	 * has made them writable.
++	 */
++	if (test_bit(KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS, &vcpu->kvm->arch.flags))
++		return access_id_reg(vcpu, p, r);
++
++	/*
++	 * Otherwise, fall back to the old behavior of returning the value of
++	 * the current CPU.
++	 */
+ 	switch (reg_to_encoding(r)) {
+ 	case SYS_REVIDR_EL1:
+ 		p->regval = read_sysreg(revidr_el1);
+@@ -2300,18 +2311,43 @@ static u64 reset_imp_id_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+ static int set_imp_id_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
+ 			  u64 val)
+ {
++	struct kvm *kvm = vcpu->kvm;
+ 	u64 expected;
++
++	guard(mutex)(&kvm->arch.config_lock);
++
+ 	expected = read_id_reg(vcpu, r);
++	if (expected == val)
++		return 0;
+ 
+-	return (expected == val) ? 0 : -EINVAL;
++	if (!test_bit(KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS, &kvm->arch.flags))
++		return -EINVAL;
++
++	/*
++	 * Once the VM has started the ID registers are immutable. Reject the
++	 * write if userspace tries to change it.
++	 */
++	if (kvm_vm_has_ran_once(kvm))
++		return -EBUSY;
++
++	/*
++	 * Any value is allowed for the implementation ID registers so long as
++	 * it is within the writable mask.
++	 */
++	if ((val & r->val) != val)
++		return -EINVAL;
++
++	kvm_set_vm_id_reg(kvm, reg_to_encoding(r), val);
++	return 0;
+ }
+ 
+-#define IMPLEMENTATION_ID(reg) {			\
++#define IMPLEMENTATION_ID(reg, mask) {			\
+ 	SYS_DESC(SYS_##reg),				\
+ 	.access = access_imp_id_reg,			\
+ 	.get_user = get_id_reg,				\
+ 	.set_user = set_imp_id_reg,			\
+ 	.reset = reset_imp_id_reg,			\
++	.val = mask,					\
+ }
+ 
+ /*
+@@ -2423,9 +2459,9 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 
+ 	{ SYS_DESC(SYS_DBGVCR32_EL2), NULL, reset_val, DBGVCR32_EL2, 0 },
+ 
+-	IMPLEMENTATION_ID(MIDR_EL1),
++	IMPLEMENTATION_ID(MIDR_EL1, GENMASK_ULL(31, 0)),
+ 	{ SYS_DESC(SYS_MPIDR_EL1), NULL, reset_mpidr, MPIDR_EL1 },
+-	IMPLEMENTATION_ID(REVIDR_EL1),
++	IMPLEMENTATION_ID(REVIDR_EL1, -1),
+ 
+ 	/*
+ 	 * ID regs: all ID_SANITISED() entries here must have corresponding
+@@ -2688,7 +2724,7 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	  .set_user = set_clidr, .val = ~CLIDR_EL1_RES0 },
+ 	{ SYS_DESC(SYS_CCSIDR2_EL1), undef_access },
+ 	{ SYS_DESC(SYS_SMIDR_EL1), undef_access },
+-	IMPLEMENTATION_ID(AIDR_EL1),
++	IMPLEMENTATION_ID(AIDR_EL1, -1),
+ 	{ SYS_DESC(SYS_CSSELR_EL1), access_csselr, reset_unknown, CSSELR_EL1 },
+ 	ID_FILTERED(CTR_EL0, ctr_el0,
+ 			    CTR_EL0_DIC_MASK |
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 77f89db47c8b..7bb8856bcce3 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1202,6 +1202,8 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
+ #define KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES 230
+ 
++#define KVM_CAP_ARM_WRITABLE_IMP_ID_REGS 239
++
+ #define KVM_CAP_SEV_ES_GHCB 500
+ 
+ #define KVM_CAP_ARM_VIRT_MSI_BYPASS 799
+-- 
+2.43.0
+
