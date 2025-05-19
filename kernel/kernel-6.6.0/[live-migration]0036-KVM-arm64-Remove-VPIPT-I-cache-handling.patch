@@ -1,0 +1,186 @@
+From aff2e0ec59814b1e374ac2efb56bae1e5ca99e18 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:14:42 +0800
+Subject: [PATCH 36/50] KVM: arm64: Remove VPIPT I-cache handling
+
+---
+ arch/arm64/include/asm/kvm_mmu.h | 30 ++++++++++++----
+ arch/arm64/kvm/hyp/nvhe/pkvm.c   |  2 +-
+ arch/arm64/kvm/hyp/nvhe/tlb.c    | 60 --------------------------------
+ arch/arm64/kvm/hyp/vhe/tlb.c     | 12 -------
+ 4 files changed, 25 insertions(+), 79 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index d698ce35deb8..735b4dd71e68 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -224,16 +224,34 @@ static inline void __clean_dcache_guest_page(void *va, size_t size)
+ 	kvm_flush_dcache_to_poc(va, size);
+ }
+ 
++static inline size_t __invalidate_icache_max_range(void)
++{
++	u8 iminline;
++	u64 ctr;
++
++	asm volatile(ALTERNATIVE_CB("movz %0, #0\n"
++				    "movk %0, #0, lsl #16\n"
++				    "movk %0, #0, lsl #32\n"
++				    "movk %0, #0, lsl #48\n",
++				    ARM64_ALWAYS_SYSTEM,
++				    kvm_compute_final_ctr_el0)
++		     : "=r" (ctr));
++
++	iminline = SYS_FIELD_GET(CTR_EL0, IminLine, ctr) + 2;
++	return MAX_DVM_OPS << iminline;
++}
++
+ static inline void __invalidate_icache_guest_page(void *va, size_t size)
+ {
+-	if (icache_is_aliasing()) {
+-		/* any kind of VIPT cache */
++	/*
++	 * Blow the whole I-cache if it is aliasing (i.e. VIPT) or the
++	 * invalidation range exceeds our arbitrary limit on invadations by
++	 * cache line.
++	 */
++	if (icache_is_aliasing() || size > __invalidate_icache_max_range())
+ 		icache_inval_all_pou();
+-	} else if (read_sysreg(CurrentEL) != CurrentEL_EL1 ||
+-		   !icache_is_vpipt()) {
+-		/* PIPT or VPIPT at EL2 (see comment in __kvm_tlb_flush_vmid_ipa) */
++	else
+ 		icache_inval_pou((unsigned long)va, (unsigned long)va + size);
+-	}
+ }
+ 
+ void kvm_set_way_flush(struct kvm_vcpu *vcpu);
+diff --git a/arch/arm64/kvm/hyp/nvhe/pkvm.c b/arch/arm64/kvm/hyp/nvhe/pkvm.c
+index d123cec0d249..7e8480f0b2c3 100644
+--- a/arch/arm64/kvm/hyp/nvhe/pkvm.c
++++ b/arch/arm64/kvm/hyp/nvhe/pkvm.c
+@@ -12,7 +12,7 @@
+ #include <nvhe/pkvm.h>
+ #include <nvhe/trap_handler.h>
+ 
+-/* Used by icache_is_vpipt(). */
++/* Used by icache_is_aliasing(). */
+ unsigned long __icache_flags;
+ 
+ /* Used by kvm_get_vttbr(). */
+diff --git a/arch/arm64/kvm/hyp/nvhe/tlb.c b/arch/arm64/kvm/hyp/nvhe/tlb.c
+index 1b265713d6be..e76aac255a57 100644
+--- a/arch/arm64/kvm/hyp/nvhe/tlb.c
++++ b/arch/arm64/kvm/hyp/nvhe/tlb.c
+@@ -105,28 +105,6 @@ void __kvm_tlb_flush_vmid_ipa(struct kvm_s2_mmu *mmu,
+ 	dsb(ish);
+ 	isb();
+ 
+-	/*
+-	 * If the host is running at EL1 and we have a VPIPT I-cache,
+-	 * then we must perform I-cache maintenance at EL2 in order for
+-	 * it to have an effect on the guest. Since the guest cannot hit
+-	 * I-cache lines allocated with a different VMID, we don't need
+-	 * to worry about junk out of guest reset (we nuke the I-cache on
+-	 * VMID rollover), but we do need to be careful when remapping
+-	 * executable pages for the same guest. This can happen when KSM
+-	 * takes a CoW fault on an executable page, copies the page into
+-	 * a page that was previously mapped in the guest and then needs
+-	 * to invalidate the guest view of the I-cache for that page
+-	 * from EL1. To solve this, we invalidate the entire I-cache when
+-	 * unmapping a page from a guest if we have a VPIPT I-cache but
+-	 * the host is running at EL1. As above, we could do better if
+-	 * we had the VA.
+-	 *
+-	 * The moral of this story is: if you have a VPIPT I-cache, then
+-	 * you should be running with VHE enabled.
+-	 */
+-	if (icache_is_vpipt())
+-		icache_inval_all_pou();
+-
+ 	__tlb_switch_to_host(&cxt);
+ }
+ 
+@@ -157,28 +135,6 @@ void __kvm_tlb_flush_vmid_ipa_nsh(struct kvm_s2_mmu *mmu,
+ 	dsb(nsh);
+ 	isb();
+ 
+-	/*
+-	 * If the host is running at EL1 and we have a VPIPT I-cache,
+-	 * then we must perform I-cache maintenance at EL2 in order for
+-	 * it to have an effect on the guest. Since the guest cannot hit
+-	 * I-cache lines allocated with a different VMID, we don't need
+-	 * to worry about junk out of guest reset (we nuke the I-cache on
+-	 * VMID rollover), but we do need to be careful when remapping
+-	 * executable pages for the same guest. This can happen when KSM
+-	 * takes a CoW fault on an executable page, copies the page into
+-	 * a page that was previously mapped in the guest and then needs
+-	 * to invalidate the guest view of the I-cache for that page
+-	 * from EL1. To solve this, we invalidate the entire I-cache when
+-	 * unmapping a page from a guest if we have a VPIPT I-cache but
+-	 * the host is running at EL1. As above, we could do better if
+-	 * we had the VA.
+-	 *
+-	 * The moral of this story is: if you have a VPIPT I-cache, then
+-	 * you should be running with VHE enabled.
+-	 */
+-	if (icache_is_vpipt())
+-		icache_inval_all_pou();
+-
+ 	__tlb_switch_to_host(&cxt);
+ }
+ 
+@@ -205,10 +161,6 @@ void __kvm_tlb_flush_vmid_range(struct kvm_s2_mmu *mmu,
+ 	dsb(ish);
+ 	isb();
+ 
+-	/* See the comment in __kvm_tlb_flush_vmid_ipa() */
+-	if (icache_is_vpipt())
+-		icache_inval_all_pou();
+-
+ 	__tlb_switch_to_host(&cxt);
+ }
+ 
+@@ -247,17 +199,5 @@ void __kvm_flush_vm_context(void)
+ 	dsb(ish);
+ 	__tlbi(alle1is);
+ 
+-	/*
+-	 * VIPT and PIPT caches are not affected by VMID, so no maintenance
+-	 * is necessary across a VMID rollover.
+-	 *
+-	 * VPIPT caches constrain lookup and maintenance to the active VMID,
+-	 * so we need to invalidate lines with a stale VMID to avoid an ABA
+-	 * race after multiple rollovers.
+-	 *
+-	 */
+-	if (icache_is_vpipt())
+-		asm volatile("ic ialluis");
+-
+ 	dsb(ish);
+ }
+diff --git a/arch/arm64/kvm/hyp/vhe/tlb.c b/arch/arm64/kvm/hyp/vhe/tlb.c
+index 46bd43f61d76..183e82effd4f 100644
+--- a/arch/arm64/kvm/hyp/vhe/tlb.c
++++ b/arch/arm64/kvm/hyp/vhe/tlb.c
+@@ -207,17 +207,5 @@ void __kvm_flush_vm_context(void)
+ 	dsb(ishst);
+ 	__tlbi(alle1is);
+ 
+-	/*
+-	 * VIPT and PIPT caches are not affected by VMID, so no maintenance
+-	 * is necessary across a VMID rollover.
+-	 *
+-	 * VPIPT caches constrain lookup and maintenance to the active VMID,
+-	 * so we need to invalidate lines with a stale VMID to avoid an ABA
+-	 * race after multiple rollovers.
+-	 *
+-	 */
+-	if (icache_is_vpipt())
+-		asm volatile("ic ialluis");
+-
+ 	dsb(ish);
+ }
+-- 
+2.43.0
+
