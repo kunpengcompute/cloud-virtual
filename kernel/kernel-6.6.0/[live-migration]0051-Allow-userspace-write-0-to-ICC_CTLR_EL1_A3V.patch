@@ -1,0 +1,25 @@
+From ad58fea31b81c11f00e7b4e9ea0d51f0ae8efc40 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Fri, 16 May 2025 11:33:32 +0800
+Subject: [PATCH] Allow userspace write 0 to ICC_CTLR_EL1_A3V
+
+---
+ arch/arm64/kvm/vgic-sys-reg-v3.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/vgic-sys-reg-v3.c b/arch/arm64/kvm/vgic-sys-reg-v3.c
+index 9e7c486b48c2..71b448d49287 100644
+--- a/arch/arm64/kvm/vgic-sys-reg-v3.c
++++ b/arch/arm64/kvm/vgic-sys-reg-v3.c
+@@ -42,7 +42,7 @@ static int set_gic_ctlr(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
+ 
+ 	host_a3v = FIELD_GET(ICH_VTR_A3V_MASK, kvm_vgic_global_state.ich_vtr_el2);
+ 	a3v = FIELD_GET(ICC_CTLR_EL1_A3V_MASK, val);
+-	if (host_a3v != a3v)
++	if (host_a3v < a3v)
+ 		return -EINVAL;
+ 
+ 	/*
+-- 
+2.43.0
+

@@ -1,0 +1,30 @@
+From 92731192e1c8f7ad3e1fca229414f9d8d4dcf070 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:33:02 +0800
+Subject: [PATCH 50/50] KVM: arm64: Allow userspace to write
+ ID_AA64MMFR2_EL1.EVT,FWB,IDS,CCIDX
+
+---
+ arch/arm64/kvm/sys_regs.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index a2e9f7716931..5a2b8d2566cb 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -2578,11 +2578,7 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 					ID_AA64MMFR1_EL1_VH |
+ 					ID_AA64MMFR1_EL1_VMIDBits)),
+ 	ID_WRITABLE(ID_AA64MMFR2_EL1, ~(ID_AA64MMFR2_EL1_RES0 |
+-									ID_AA64MMFR2_EL1_EVT |
+-									ID_AA64MMFR2_EL1_FWB |
+-									ID_AA64MMFR2_EL1_IDS |
+-									ID_AA64MMFR2_EL1_NV |
+-									ID_AA64MMFR2_EL1_CCIDX)),
++					ID_AA64MMFR2_EL1_NV)),
+ 	ID_SANITISED(ID_AA64MMFR3_EL1),
+ 	ID_UNALLOCATED(7,4),
+ 	ID_UNALLOCATED(7,5),
+-- 
+2.43.0
+

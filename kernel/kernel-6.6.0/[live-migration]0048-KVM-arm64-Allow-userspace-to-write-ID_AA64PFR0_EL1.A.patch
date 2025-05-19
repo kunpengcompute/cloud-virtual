@@ -1,0 +1,30 @@
+From 62a25a001b141ad6fc4c0245ad8dced181a47711 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:29:02 +0800
+Subject: [PATCH 48/50] KVM: arm64: Allow userspace to write
+ ID_AA64PFR0_EL1.AMU,MPAM,SVE,RAS
+
+---
+ arch/arm64/kvm/sys_regs.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index aa170e2aeb56..4d1026a1ad2f 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -2509,11 +2509,7 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	/* AArch64 ID registers */
+ 	/* CRm=4 */
+ 	ID_FILTERED(ID_AA64PFR0_EL1, id_aa64pfr0_el1,
+-		        ~(ID_AA64PFR0_EL1_AMU |
+-				  ID_AA64PFR0_EL1_MPAM |
+-				  ID_AA64PFR0_EL1_SVE |
+-				  ID_AA64PFR0_EL1_RAS |
+-				  ID_AA64PFR0_EL1_AdvSIMD |
++				~(ID_AA64PFR0_EL1_AdvSIMD |
+ 				  ID_AA64PFR0_EL1_FP)),
+ 	ID_FILTERED(ID_AA64PFR1_EL1, id_aa64pfr1_el1,
+ 				~(ID_AA64PFR1_EL1_PFAR |
+-- 
+2.43.0
+
