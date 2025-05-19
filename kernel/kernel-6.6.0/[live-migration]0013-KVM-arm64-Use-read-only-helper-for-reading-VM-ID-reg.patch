@@ -1,0 +1,84 @@
+From b8ba9906938b15139abaf2d46b8edb7a9bba963f Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:53:42 +0800
+Subject: [PATCH 13/32] KVM: arm64: Use read-only helper for reading VM ID
+ registers
+
+---
+ arch/arm64/include/asm/kvm_host.h | 14 ++++++++++++++
+ arch/arm64/kvm/pmu-emul.c         |  2 +-
+ arch/arm64/kvm/sys_regs.c         |  6 +++---
+ 3 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index f4d5ebe1adb5..10e6cb4e4b34 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1297,6 +1297,20 @@ extern unsigned int twedel;
+ void kvm_arm_vcpu_power_off(struct kvm_vcpu *vcpu);
+ bool kvm_arm_vcpu_stopped(struct kvm_vcpu *vcpu);
+ 
++static inline u64 *__vm_id_reg(struct kvm_arch *ka, u32 reg)
++{
++	switch (reg) {
++	case sys_reg(3, 0, 0, 1, 0) ... sys_reg(3, 0, 0, 7, 7):
++		return &ka->id_regs[IDREG_IDX(reg)];
++	default:
++		WARN_ON_ONCE(1);
++		return NULL;
++	}
++}
++
++#define kvm_read_vm_id_reg(kvm, reg)					\
++	({ u64 __val = *__vm_id_reg(&(kvm)->arch, reg); __val; })
++
+ extern bool force_wfi_trap;
+ extern bool kvm_ncsnp_support;
+ extern bool kvm_dvmbm_support;
+diff --git a/arch/arm64/kvm/pmu-emul.c b/arch/arm64/kvm/pmu-emul.c
+index 4012c37af4fb..d602a3f3f517 100644
+--- a/arch/arm64/kvm/pmu-emul.c
++++ b/arch/arm64/kvm/pmu-emul.c
+@@ -55,7 +55,7 @@ static u32 __kvm_pmu_event_mask(unsigned int pmuver)
+ 
+ static u32 kvm_pmu_event_mask(struct kvm *kvm)
+ {
+-	u64 dfr0 = IDREG(kvm, SYS_ID_AA64DFR0_EL1);
++	u64 dfr0 = kvm_read_vm_id_reg(kvm, SYS_ID_AA64DFR0_EL1);
+ 	u8 pmuver = SYS_FIELD_GET(ID_AA64DFR0_EL1, PMUVer, dfr0);
+ 
+ 	return __kvm_pmu_event_mask(pmuver);
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 05eea6ad21ff..1690ce714c37 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1510,7 +1510,7 @@ static u64 kvm_read_sanitised_id_reg(struct kvm_vcpu *vcpu,
+ 
+ static u64 read_id_reg(const struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+ {
+-	return IDREG(vcpu->kvm, reg_to_encoding(r));
++	return kvm_read_vm_id_reg(vcpu->kvm, reg_to_encoding(r));
+ }
+ 
+ static bool is_feature_id_reg(u32 encoding)
+@@ -2755,7 +2755,7 @@ static bool trap_dbgdidr(struct kvm_vcpu *vcpu,
+ 	if (p->is_write) {
+ 		return ignore_write(vcpu, p);
+ 	} else {
+-		u64 dfr = IDREG(vcpu->kvm, SYS_ID_AA64DFR0_EL1);
++		u64 dfr = kvm_read_vm_id_reg(vcpu->kvm, SYS_ID_AA64DFR0_EL1);
+ 		u64 pfr = IDREG(vcpu->kvm, SYS_ID_AA64PFR0_EL1);
+ 		u32 el3 = !!cpuid_feature_extract_unsigned_field(pfr, ID_AA64PFR0_EL1_EL3_SHIFT);
+ 
+@@ -3527,7 +3527,7 @@ static int idregs_debug_show(struct seq_file *s, void *v)
+ 		return 0;
+ 
+ 	seq_printf(s, "%20s:\t%016llx\n",
+-			desc->name, IDREG(kvm, reg_to_encoding(desc)));
++		desc->name, kvm_read_vm_id_reg(kvm, reg_to_encoding(desc)));
+ 
+ 	return 0;
+ }
+-- 
+2.43.0
+

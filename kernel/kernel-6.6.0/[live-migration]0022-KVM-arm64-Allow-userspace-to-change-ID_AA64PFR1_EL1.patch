@@ -1,0 +1,54 @@
+From e9b220b65066154eaaad1705fc687b9783347daa Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:59:59 +0800
+Subject: [PATCH 22/32] KVM: arm64: Allow userspace to change ID_AA64PFR1_EL1
+
+---
+ arch/arm64/kvm/sys_regs.c | 22 ++++++++++++++--------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index fac9683e3018..09b7e513f9b2 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1769,15 +1769,9 @@ static int set_id_aa64pfr1_el1(struct kvm_vcpu *vcpu,
+ 	    (nmi && (!cpus_have_const_cap(ARM64_HAS_NMI) || static_branch_unlikely(&vgic_v3_cpuif_trap))))
+ 		return -EINVAL;
+ 
+-	/* We can only differ with NMI, and anything else is an error */
+-	val ^= read_id_reg(vcpu, rd);
+-	val &= ~ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_NMI);
+-	if (val)
+-		return -EINVAL;
+-
+ 	vcpu->kvm->arch.pfr1_nmi = nmi;
+ 
+-	return 0;
++	return set_id_reg(vcpu, rd, val);
+ }
+ 
+ /*
+@@ -2322,7 +2316,19 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 			   ID_AA64PFR0_EL1_FP), },
+ 	{ SYS_DESC(SYS_ID_AA64PFR1_EL1), .access = access_id_reg,
+ 	  .get_user = get_id_reg, .set_user = set_id_aa64pfr1_el1,
+-	  .reset = kvm_read_sanitised_id_reg, },
++	  .reset = kvm_read_sanitised_id_reg, 
++	  .val = ~(ID_AA64PFR1_EL1_PFAR |
++			   ID_AA64PFR1_EL1_DF2 |
++			   ID_AA64PFR1_EL1_MTEX |
++			   ID_AA64PFR1_EL1_THE |
++			   ID_AA64PFR1_EL1_GCS |
++			   ID_AA64PFR1_EL1_MTE_frac |
++			   ID_AA64PFR1_EL1_RNDR_trap |
++			   ID_AA64PFR1_EL1_SME |
++			   ID_AA64PFR1_EL1_RES0 |
++			   ID_AA64PFR1_EL1_MPAM_frac |
++			   ID_AA64PFR1_EL1_RAS_frac |
++			   ID_AA64PFR1_EL1_MTE),},
+ 	ID_UNALLOCATED(4,2),
+ 	ID_UNALLOCATED(4,3),
+ 	ID_WRITABLE(ID_AA64ZFR0_EL1, ~ID_AA64ZFR0_EL1_RES0),
+-- 
+2.43.0
+

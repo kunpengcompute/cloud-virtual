@@ -1,0 +1,38 @@
+From 3c2babae115fbe992bd0ce112738dc8ccbb74d5b Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:55:23 +0800
+Subject: [PATCH 17/32] KVM: arm64: rename functions for invariant sys regs
+
+---
+ arch/arm64/kvm/sys_regs.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 039990dd83ec..ec62801ed289 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -3717,7 +3717,7 @@ id_to_sys_reg_desc(struct kvm_vcpu *vcpu, u64 id,
+  */
+ 
+ #define FUNCTION_INVARIANT(reg)						\
+-	static u64 get_##reg(struct kvm_vcpu *v,			\
++	static u64 reset_##reg(struct kvm_vcpu *v,			\
+ 			      const struct sys_reg_desc *r)		\
+ 	{								\
+ 		((struct sys_reg_desc *)r)->val = read_sysreg(reg);	\
+@@ -3730,9 +3730,9 @@ FUNCTION_INVARIANT(aidr_el1)
+ 
+ /* ->val is filled in by kvm_sys_reg_table_init() */
+ static struct sys_reg_desc invariant_sys_regs[] __ro_after_init = {
+-	{ SYS_DESC(SYS_MIDR_EL1), NULL, get_midr_el1 },
+-	{ SYS_DESC(SYS_REVIDR_EL1), NULL, get_revidr_el1 },
+-	{ SYS_DESC(SYS_AIDR_EL1), NULL, get_aidr_el1 },
++	{ SYS_DESC(SYS_MIDR_EL1), NULL, reset_midr_el1 },
++	{ SYS_DESC(SYS_REVIDR_EL1), NULL, reset_revidr_el1 },
++	{ SYS_DESC(SYS_AIDR_EL1), NULL, reset_aidr_el1 },
+ };
+ 
+ static int get_invariant_sys_reg(u64 id, u64 __user *uaddr)
+-- 
+2.43.0
+

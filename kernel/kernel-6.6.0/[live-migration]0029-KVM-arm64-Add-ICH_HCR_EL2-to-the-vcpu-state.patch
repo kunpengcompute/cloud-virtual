@@ -1,0 +1,39 @@
+From f4bbaa5b9fadeb6f3a7295864c5d27402f99ffe2 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:04:48 +0800
+Subject: [PATCH 29/32] KVM: arm64: Add ICH_HCR_EL2 to the vcpu state
+
+---
+ arch/arm64/include/asm/kvm_host.h | 2 ++
+ arch/arm64/kvm/sys_regs.c         | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index b72eb25558df..a84cf5117612 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -384,6 +384,8 @@ enum vcpu_sysreg {
+ 	CNTP_CVAL_EL0,
+ 	CNTP_CTL_EL0,
+ 
++	ICH_HCR_EL2,
++
+ 	/* Memory Tagging Extension registers */
+ 	RGSR_EL1,	/* Random Allocation Tag Seed Register */
+ 	GCR_EL1,	/* Tag Control Register */
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 355e3df878f8..9235efbd652d 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -2761,6 +2761,8 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	EL2_REG(RVBAR_EL2, access_rw, reset_val, 0),
+ 	{ SYS_DESC(SYS_RMR_EL2), trap_undef },
+ 
++	EL2_REG(ICH_HCR_EL2, undef_access, reset_val, 0),
++
+ 	EL2_REG(CONTEXTIDR_EL2, access_rw, reset_val, 0),
+ 	EL2_REG(TPIDR_EL2, access_rw, reset_val, 0),
+ 
+-- 
+2.43.0
+

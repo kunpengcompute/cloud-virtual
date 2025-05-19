@@ -1,0 +1,55 @@
+From 5eb7bc71e6dff4fbf5a0d369d322f57152e6ef34 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:03:03 +0800
+Subject: [PATCH 27/32] KVM: arm64: Force GICv3 traps activa when no irqchip is
+ configured on VHE
+
+---
+ arch/arm64/kvm/vgic/vgic.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/vgic/vgic.c b/arch/arm64/kvm/vgic/vgic.c
+index ec110006acf5..b68fbbc64b5e 100644
+--- a/arch/arm64/kvm/vgic/vgic.c
++++ b/arch/arm64/kvm/vgic/vgic.c
+@@ -1009,13 +1009,16 @@ void kvm_vgic_flush_hwstate(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vgic_load(struct kvm_vcpu *vcpu)
+ {
+-	if (unlikely(!vgic_initialized(vcpu->kvm)))
++	if (unlikely(!irqchip_in_kernel(vcpu->kvm) || !vgic_initialized(vcpu->kvm))) {
++		if (has_vhe() && static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
++			__vgic_v3_activate_traps(&vcpu->arch.vgic_cpu.vgic_v3);
+ 		return;
++	}
+ #ifdef CONFIG_HISI_VIRTCCA_HOST
+ 	if (vcpu_is_tec(vcpu))
+ 		return;
+ #endif
+-	if (kvm_vgic_global_state.type == VGIC_V2)
++	if (!static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
+ 		vgic_v2_load(vcpu);
+ 	else
+ 		vgic_v3_load(vcpu);
+@@ -1023,13 +1026,16 @@ void kvm_vgic_load(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vgic_put(struct kvm_vcpu *vcpu)
+ {
+-	if (unlikely(!vgic_initialized(vcpu->kvm)))
++	if (unlikely(!irqchip_in_kernel(vcpu->kvm) || !vgic_initialized(vcpu->kvm))) {
++		if (has_vhe() && static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
++			__vgic_v3_deactivate_traps(&vcpu->arch.vgic_cpu.vgic_v3);
+ 		return;
++	}
+ #ifdef CONFIG_HISI_VIRTCCA_HOST
+ 	if (vcpu_is_tec(vcpu))
+ 		return;
+ #endif
+-	if (kvm_vgic_global_state.type == VGIC_V2)
++	if (!static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
+ 		vgic_v2_put(vcpu);
+ 	else
+ 		vgic_v3_put(vcpu);
+-- 
+2.43.0
+

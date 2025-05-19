@@ -1,0 +1,24 @@
+From 421c7037dffa2571fcf59c87bcacfb5109329cd9 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:01:10 +0800
+Subject: [PATCH 24/32] Allow userspace write ID_AA64PFR0_EL1_GIC
+
+---
+ arch/arm64/kvm/sys_regs.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index b777e484496c..aa608680794d 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -2311,7 +2311,6 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 			   ID_AA64PFR0_EL1_MPAM |
+ 			   ID_AA64PFR0_EL1_SVE |
+ 			   ID_AA64PFR0_EL1_RAS |
+-			   ID_AA64PFR0_EL1_GIC |
+ 			   ID_AA64PFR0_EL1_AdvSIMD |
+ 			   ID_AA64PFR0_EL1_FP), },
+ 	{ SYS_DESC(SYS_ID_AA64PFR1_EL1), .access = access_id_reg,
+-- 
+2.43.0
+

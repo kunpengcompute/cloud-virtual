@@ -1,0 +1,68 @@
+From 896795bfc4aa1bed04ea2e9f7281dbf0c5b31da4 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:54:07 +0800
+Subject: [PATCH 14/32] KVM: arm64: Add helper for writing ID regs
+
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/sys_regs.c         | 17 ++++++++++++++---
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 10e6cb4e4b34..ba113ec5980f 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1311,6 +1311,8 @@ static inline u64 *__vm_id_reg(struct kvm_arch *ka, u32 reg)
+ #define kvm_read_vm_id_reg(kvm, reg)					\
+ 	({ u64 __val = *__vm_id_reg(&(kvm)->arch, reg); __val; })
+ 
++void kvm_set_vm_id_reg(struct kvm *kvm, u32 reg, u64 val);
++
+ extern bool force_wfi_trap;
+ extern bool kvm_ncsnp_support;
+ extern bool kvm_dvmbm_support;
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 1690ce714c37..9fa1e88fb6a4 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1822,7 +1822,7 @@ static int set_id_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *rd,
+ 
+ 	ret = arm64_check_features(vcpu, rd, val);
+ 	if (!ret)
+-		IDREG(vcpu->kvm, id) = val;
++		kvm_set_vm_id_reg(vcpu->kvm, id, val);
+ 
+ 	mutex_unlock(&vcpu->kvm->arch.config_lock);
+ 
+@@ -1838,6 +1838,18 @@ static int set_id_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *rd,
+ 	return ret;
+ }
+ 
++void kvm_set_vm_id_reg(struct kvm *kvm, u32 reg, u64 val)
++{
++	u64 *p = __vm_id_reg(&kvm->arch, reg);
++
++	lockdep_assert_held(&kvm->arch.config_lock);
++
++	if (KVM_BUG_ON(kvm_vm_has_ran_once(kvm) || !p, kvm))
++		return;
++
++	*p = val;
++}
++
+ static int get_raz_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *rd,
+ 		       u64 *val)
+ {
+@@ -3557,8 +3569,7 @@ static void reset_vm_ftr_id_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc
+ 	if (test_bit(KVM_ARCH_FLAG_ID_REGS_INITIALIZED, &kvm->arch.flags))
+ 		return;
+ 
+-	lockdep_assert_held(&kvm->arch.config_lock);
+-	IDREG(kvm, id) = reg->reset(vcpu, reg);
++	kvm_set_vm_id_reg(kvm, id, reg->reset(vcpu, reg));
+ }
+ 
+ static void reset_vcpu_ftr_id_reg(struct kvm_vcpu *vcpu,
+-- 
+2.43.0
+

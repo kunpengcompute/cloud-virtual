@@ -1,0 +1,387 @@
+From bc52f09791dc15fc2dbef61315a2e196acc23799 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 14:49:49 +0800
+Subject: [PATCH 08/32] KVM: arm64: PMU: Allow userspace to limit PMCR_EL0.N
+ for the guest,Sanitize PM{C,I}NTEN{SET,CLR}, PMOVS{SET,CLR} before first run
+
+---
+ arch/arm64/include/asm/kvm_host.h |   3 +
+ arch/arm64/kvm/arm.c              |   2 +-
+ arch/arm64/kvm/pmu-emul.c         |  36 ++++++-
+ arch/arm64/kvm/sys_regs.c         | 157 ++++++++++++++++++++++++++----
+ include/kvm/arm_pmu.h             |   8 ++
+ 5 files changed, 184 insertions(+), 22 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index d5e03928940d..702ac45c9f23 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -264,6 +264,9 @@ struct kvm_arch {
+ 
+ 	cpumask_var_t supported_cpus;
+ 
++	/* PMCR_EL0.N value for the guest */
++	u8 pmcr_n;
++
+ 	/* Hypercall features firmware registers' descriptor */
+ 	struct kvm_smccc_features smccc_feat;
+ 	struct maple_tree smccc_filter;
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 43e9ab4c7feb..e69dc099d248 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -988,7 +988,7 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		}
+ 
+ 		if (kvm_check_request(KVM_REQ_RELOAD_PMU, vcpu))
+-			kvm_pmu_handle_pmcr(vcpu, kvm_vcpu_read_pmcr(vcpu));
++			kvm_vcpu_handle_request_reload_pmu(vcpu);
+ 
+ 		if (kvm_check_request(KVM_REQ_RESYNC_PMU_EL0, vcpu))
+ 			kvm_vcpu_pmu_restore_guest(vcpu);
+diff --git a/arch/arm64/kvm/pmu-emul.c b/arch/arm64/kvm/pmu-emul.c
+index fc106652249c..4012c37af4fb 100644
+--- a/arch/arm64/kvm/pmu-emul.c
++++ b/arch/arm64/kvm/pmu-emul.c
+@@ -716,6 +716,9 @@ void kvm_host_pmu_init(struct arm_pmu *pmu)
+ 	if (!entry)
+ 		goto out_unlock;
+ 
++	WARN_ON((pmu->num_events <= 0) ||
++			(pmu->num_events > ARMV8_PMU_MAX_COUNTERS));
++
+ 	entry->arm_pmu = pmu;
+ 	list_add_tail(&entry->entry, &arm_pmus);
+ 
+@@ -811,6 +814,17 @@ u64 kvm_pmu_get_pmceid(struct kvm_vcpu *vcpu, bool pmceid1)
+ 	return val & mask;
+ }
+ 
++void kvm_vcpu_handle_request_reload_pmu(struct kvm_vcpu *vcpu)
++{
++	u64 mask = kvm_pmu_valid_counter_mask(vcpu);
++
++	kvm_pmu_handle_pmcr(vcpu, kvm_vcpu_read_pmcr(vcpu));
++
++	__vcpu_sys_reg(vcpu, PMOVSSET_EL0) &= mask;
++	__vcpu_sys_reg(vcpu, PMINTENSET_EL1) &= mask;
++	__vcpu_sys_reg(vcpu, PMCNTENSET_EL0) &= mask;
++}
++
+ int kvm_arm_pmu_v3_enable(struct kvm_vcpu *vcpu)
+ {
+ 	if (!kvm_vcpu_has_pmu(vcpu))
+@@ -899,11 +913,29 @@ static bool pmu_irq_is_valid(struct kvm *kvm, int irq)
+ 	return true;
+ }
+ 
++/**
++ * kvm_arm_pmu_get_max_counters - Return the max number of PMU counters.
++ * @kvm: The kvm pointer
++ */
++int kvm_arm_pmu_get_max_counters(struct kvm *kvm)
++{
++	struct arm_pmu *arm_pmu = kvm->arch.arm_pmu;
++
++	lockdep_assert_held(&kvm->arch.config_lock);
++
++	/*
++	 * The arm_pmu->num_events considers the cycle counter as well.
++	 * Ignore that and return only the general-purpose counters.
++	 */
++	return arm_pmu->num_events - 1;
++}
++
+ static void kvm_arm_set_pmu(struct kvm *kvm, struct arm_pmu *arm_pmu)
+ {
+ 	lockdep_assert_held(&kvm->arch.config_lock);
+ 
+ 	kvm->arch.arm_pmu = arm_pmu;
++	kvm->arch.pmcr_n = kvm_arm_pmu_get_max_counters(kvm);
+ }
+ 
+ /**
+@@ -1117,5 +1149,7 @@ u8 kvm_arm_pmu_get_pmuver_limit(void)
+  */
+ u64 kvm_vcpu_read_pmcr(struct kvm_vcpu *vcpu)
+ {
+-	return __vcpu_sys_reg(vcpu, PMCR_EL0);
++	u64 pmcr = __vcpu_sys_reg(vcpu, PMCR_EL0);
++
++	return u64_replace_bits(pmcr, vcpu->kvm->arch.pmcr_n, ARMV8_PMU_PMCR_N);
+ }
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 37d394a2c90a..0e54fe2ae827 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -744,11 +744,7 @@ static u64 reset_pmu_reg(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+ {
+ 	u64 n, mask = BIT(ARMV8_PMU_CYCLE_IDX);
+ 
+-	/* No PMU available, any PMU reg may UNDEF... */
+-	if (!kvm_arm_support_pmu_v3())
+-		return 0;
+-
+-	n = FIELD_GET(ARMV8_PMU_PMCR_N, read_sysreg(pmcr_el0));
++	n = vcpu->kvm->arch.pmcr_n;
+ 	if (n)
+ 		mask |= GENMASK(n - 1, 0);
+ 
+@@ -788,17 +784,15 @@ static u64 reset_pmselr(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+ 
+ static u64 reset_pmcr(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+ {
+-	u64 pmcr;
++	u64 pmcr = 0;
+ 
+-	/* No PMU available, PMCR_EL0 may UNDEF... */
+-	if (!kvm_arm_support_pmu_v3())
+-		return 0;
+-
+-	/* Only preserve PMCR_EL0.N, and reset the rest to 0 */
+-	pmcr = read_sysreg(pmcr_el0) & ARMV8_PMU_PMCR_N;
+ 	if (!kvm_supports_32bit_el0())
+ 		pmcr |= ARMV8_PMU_PMCR_LC;
+ 
++	/*
++	 * The value of PMCR.N field is included when the
++	 * vCPU register is read via kvm_vcpu_read_pmcr().
++	 */
+ 	__vcpu_sys_reg(vcpu, r->reg) = pmcr;
+ 
+ 	return __vcpu_sys_reg(vcpu, r->reg);
+@@ -1020,6 +1014,45 @@ static bool access_pmu_evtyper(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	return true;
+ }
+ 
++static void set_pmreg_for_valid_counters(struct kvm_vcpu *vcpu,
++					  u64 reg, u64 val, bool set)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	mutex_lock(&kvm->arch.config_lock);
++
++	/* Make the register immutable once the VM has started running */
++	if (kvm_vm_has_ran_once(kvm)) {
++		mutex_unlock(&kvm->arch.config_lock);
++		return;
++	}
++
++	val &= kvm_pmu_valid_counter_mask(vcpu);
++	mutex_unlock(&kvm->arch.config_lock);
++
++	if (set)
++		__vcpu_sys_reg(vcpu, reg) |= val;
++	else
++		__vcpu_sys_reg(vcpu, reg) &= ~val;
++}
++
++static int get_pmcnten(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++			u64 *val)
++{
++	u64 mask = kvm_pmu_valid_counter_mask(vcpu);
++
++	*val = __vcpu_sys_reg(vcpu, PMCNTENSET_EL0) & mask;
++	return 0;
++}
++
++static int set_pmcnten(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++			u64 val)
++{
++	/* r->Op2 & 0x1: true for PMCNTENSET_EL0, else PMCNTENCLR_EL0 */
++	set_pmreg_for_valid_counters(vcpu, PMCNTENSET_EL0, val, r->Op2 & 0x1);
++	return 0;
++}
++
+ static bool access_pmcnten(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 			   const struct sys_reg_desc *r)
+ {
+@@ -1048,6 +1081,23 @@ static bool access_pmcnten(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	return true;
+ }
+ 
++static int get_pminten(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++			u64 *val)
++{
++	u64 mask = kvm_pmu_valid_counter_mask(vcpu);
++
++	*val = __vcpu_sys_reg(vcpu, PMINTENSET_EL1) & mask;
++	return 0;
++}
++
++static int set_pminten(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++			u64 val)
++{
++	/* r->Op2 & 0x1: true for PMINTENSET_EL1, else PMINTENCLR_EL1 */
++	set_pmreg_for_valid_counters(vcpu, PMINTENSET_EL1, val, r->Op2 & 0x1);
++	return 0;
++}
++
+ static bool access_pminten(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 			   const struct sys_reg_desc *r)
+ {
+@@ -1072,6 +1122,23 @@ static bool access_pminten(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	return true;
+ }
+ 
++static int set_pmovs(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++		      u64 val)
++{
++	/* r->CRm & 0x2: true for PMOVSSET_EL0, else PMOVSCLR_EL0 */
++	set_pmreg_for_valid_counters(vcpu, PMOVSSET_EL0, val, r->CRm & 0x2);
++	return 0;
++}
++
++static int get_pmovs(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++		      u64 *val)
++{
++	u64 mask = kvm_pmu_valid_counter_mask(vcpu);
++
++	*val = __vcpu_sys_reg(vcpu, PMOVSSET_EL0) & mask;
++	return 0;
++}
++
+ static bool access_pmovs(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 			 const struct sys_reg_desc *r)
+ {
+@@ -1129,6 +1196,50 @@ static bool access_pmuserenr(struct kvm_vcpu *vcpu, struct sys_reg_params *p,
+ 	return true;
+ }
+ 
++static int get_pmcr(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++			    u64 *val)
++{
++	*val = kvm_vcpu_read_pmcr(vcpu);
++	return 0;
++}
++
++static int set_pmcr(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r,
++		    u64 val)
++{
++	struct kvm *kvm = vcpu->kvm;
++	u8 new_n = FIELD_GET(ARMV8_PMU_PMCR_N, val);
++
++	mutex_lock(&kvm->arch.config_lock);
++
++	/*
++	 * Make PMCR immutable once the VM has started running, but
++	 * do not return an error to meet the existing expectations.
++	 */
++	if (kvm_vm_has_ran_once(vcpu->kvm) &&
++		new_n <= kvm_arm_pmu_get_max_counters(kvm))
++			kvm->arch.pmcr_n = new_n;
++
++	mutex_unlock(&kvm->arch.config_lock);
++
++	/*
++	 * Ignore writes to RES0 bits, read only bits that are cleared on
++	 * vCPU reset, and writable bits that KVM doesn't support yet.
++	 * (i.e. only PMCR.N and bits [7:0] are mutable from userspace)
++	 * The LP bit is RES0 when FEAT_PMUv3p5 is not supported on the vCPU.
++	 * But, we leave the bit as it is here, as the vCPU's PMUver might
++	 * be changed later (NOTE: the bit will be cleared on first vCPU run
++	 * if necessary).
++	 */
++	val &= ARMV8_PMU_PMCR_MASK;
++
++	/* The LC bit is RES1 when AArch32 is not supported */
++	if (!kvm_supports_32bit_el0())
++		val |= ARMV8_PMU_PMCR_LC;
++
++	__vcpu_sys_reg(vcpu, r->reg) = val;
++	return 0;
++}
++
+ #define BRB_INF_SRC_TGT_EL1(n)				\
+ 	{ SYS_DESC(SYS_BRBINF_EL1(n)), undef_access },	\
+ 	{ SYS_DESC(SYS_BRBSRC_EL1(n)), undef_access },	\
+@@ -2300,9 +2411,11 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	/* PMBIDR_EL1 is not trapped */
+ 
+ 	{ PMU_SYS_REG(PMINTENSET_EL1),
+-	  .access = access_pminten, .reg = PMINTENSET_EL1 },
++	  .access = access_pminten, .reg = PMINTENSET_EL1,
++	  .get_user = get_pminten, .set_user = set_pminten },
+ 	{ PMU_SYS_REG(PMINTENCLR_EL1),
+-	  .access = access_pminten, .reg = PMINTENSET_EL1 },
++	  .access = access_pminten, .reg = PMINTENSET_EL1,
++	  .get_user = get_pminten, .set_user = set_pminten },
+ 	{ SYS_DESC(SYS_PMMIR_EL1), trap_raz_wi },
+ 
+ 	{ SYS_DESC(SYS_MAIR_EL1), access_vm_reg, reset_unknown, MAIR_EL1 },
+@@ -2354,14 +2467,17 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ SYS_DESC(SYS_CTR_EL0), access_ctr },
+ 	{ SYS_DESC(SYS_SVCR), undef_access },
+ 
+-	{ PMU_SYS_REG(PMCR_EL0), .access = access_pmcr,
+-	  .reset = reset_pmcr, .reg = PMCR_EL0 },
++	{ PMU_SYS_REG(PMCR_EL0), .access = access_pmcr, .reset = reset_pmcr,
++	  .reg = PMCR_EL0, .get_user = get_pmcr, .set_user = set_pmcr },
+ 	{ PMU_SYS_REG(PMCNTENSET_EL0),
+-	  .access = access_pmcnten, .reg = PMCNTENSET_EL0 },
++	  .access = access_pmcnten, .reg = PMCNTENSET_EL0,
++	  .get_user = get_pmcnten, .set_user = set_pmcnten },
+ 	{ PMU_SYS_REG(PMCNTENCLR_EL0),
+-	  .access = access_pmcnten, .reg = PMCNTENSET_EL0 },
++	  .access = access_pmcnten, .reg = PMCNTENSET_EL0,
++	  .get_user = get_pmcnten, .set_user = set_pmcnten },
+ 	{ PMU_SYS_REG(PMOVSCLR_EL0),
+-	  .access = access_pmovs, .reg = PMOVSSET_EL0 },
++	  .access = access_pmovs, .reg = PMOVSSET_EL0,
++	  .get_user = get_pmovs, .set_user = set_pmovs },
+ 	/*
+ 	 * PM_SWINC_EL0 is exposed to userspace as RAZ/WI, as it was
+ 	 * previously (and pointlessly) advertised in the past...
+@@ -2389,7 +2505,8 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 	{ PMU_SYS_REG(PMUSERENR_EL0), .access = access_pmuserenr,
+ 	  .reset = reset_val, .reg = PMUSERENR_EL0, .val = 0 },
+ 	{ PMU_SYS_REG(PMOVSSET_EL0),
+-	  .access = access_pmovs, .reg = PMOVSSET_EL0 },
++	  .access = access_pmovs, .reg = PMOVSSET_EL0,
++	  .get_user = get_pmovs, .set_user = set_pmovs },
+ 
+ 	{ SYS_DESC(SYS_TPIDR_EL0), NULL, reset_unknown, TPIDR_EL0 },
+ 	{ SYS_DESC(SYS_TPIDRRO_EL0), NULL, reset_unknown, TPIDRRO_EL0 },
+diff --git a/include/kvm/arm_pmu.h b/include/kvm/arm_pmu.h
+index 78238ee819af..2ad953b65d45 100644
+--- a/include/kvm/arm_pmu.h
++++ b/include/kvm/arm_pmu.h
+@@ -63,6 +63,7 @@ void kvm_pmu_software_increment(struct kvm_vcpu *vcpu, u64 val);
+ void kvm_pmu_handle_pmcr(struct kvm_vcpu *vcpu, u64 val);
+ void kvm_pmu_set_counter_event_type(struct kvm_vcpu *vcpu, u64 data,
+ 				    u64 select_idx);
++void kvm_vcpu_handle_request_reload_pmu(struct kvm_vcpu *vcpu);
+ int kvm_arm_pmu_v3_set_attr(struct kvm_vcpu *vcpu,
+ 			    struct kvm_device_attr *attr);
+ int kvm_arm_pmu_v3_get_attr(struct kvm_vcpu *vcpu,
+@@ -102,6 +103,7 @@ void kvm_vcpu_pmu_resync_el0(void);
+ 
+ u8 kvm_arm_pmu_get_pmuver_limit(void);
+ int kvm_arm_set_default_pmu(struct kvm *kvm);
++int kvm_arm_pmu_get_max_counters(struct kvm *kvm);
+ u64 kvm_pmu_evtyper_mask(struct kvm *kvm);
+ 
+ u64 kvm_vcpu_read_pmcr(struct kvm_vcpu *vcpu);
+@@ -142,6 +144,7 @@ static inline void kvm_pmu_software_increment(struct kvm_vcpu *vcpu, u64 val) {}
+ static inline void kvm_pmu_handle_pmcr(struct kvm_vcpu *vcpu, u64 val) {}
+ static inline void kvm_pmu_set_counter_event_type(struct kvm_vcpu *vcpu,
+ 						  u64 data, u64 select_idx) {}
++static inline void vm_vcpu_handle_request_reload_pmu(struct kvm_vcpu *vcpu) {}
+ static inline int kvm_arm_pmu_v3_set_attr(struct kvm_vcpu *vcpu,
+ 					  struct kvm_device_attr *attr)
+ {
+@@ -186,6 +189,11 @@ static inline int kvm_arm_set_default_pmu(struct kvm *kvm)
+ 	return -ENODEV;
+ }
+ 
++static inline int kvm_arm_pmu_get_max_counters(struct kvm *kvm)
++{
++	return -ENODEV;
++}
++
+ static inline u64 kvm_vcpu_read_pmcr(struct kvm_vcpu *vcpu)
+ {
+ 	return 0;
+-- 
+2.43.0
+
