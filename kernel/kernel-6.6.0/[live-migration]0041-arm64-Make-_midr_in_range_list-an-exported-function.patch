@@ -1,0 +1,104 @@
+From bb329c6997649bf43ea6e2eed79a6a4817f9ef21 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:17:08 +0800
+Subject: [PATCH 41/50] arm64: Make _midr_in_range_list() an exported function
+
+---
+ arch/arm64/include/asm/cputype.h | 15 +--------------
+ arch/arm64/kernel/cpu_errata.c   | 17 ++++++++++++++++-
+ arch/arm64/kernel/image-vars.h   |  4 ++++
+ arch/arm64/kvm/vgic/vgic-v3.c    |  2 +-
+ 4 files changed, 22 insertions(+), 16 deletions(-)
+
+diff --git a/arch/arm64/include/asm/cputype.h b/arch/arm64/include/asm/cputype.h
+index e48213891605..8cc5999d09c6 100644
+--- a/arch/arm64/include/asm/cputype.h
++++ b/arch/arm64/include/asm/cputype.h
+@@ -289,20 +289,7 @@ static inline bool midr_is_cpu_model_range(u32 midr, u32 model, u32 rv_min,
+ 	return _model == model && rv >= rv_min && rv <= rv_max;
+ }
+ 
+-static inline bool is_midr_in_range(struct midr_range const *range)
+-{
+-	return midr_is_cpu_model_range(read_cpuid_id(), range->model,
+-				       range->rv_min, range->rv_max);
+-}
+-
+-static inline bool
+-is_midr_in_range_list(struct midr_range const *ranges)
+-{
+-	while (ranges->model)
+-		if (is_midr_in_range(ranges++))
+-			return true;
+-	return false;
+-}
++bool is_midr_in_range_list(struct midr_range const *ranges);
+ 
+ static inline u64 __attribute_const__ read_cpuid_mpidr(void)
+ {
+diff --git a/arch/arm64/kernel/cpu_errata.c b/arch/arm64/kernel/cpu_errata.c
+index 3e09228a7f9e..3c2daa82e1b7 100644
+--- a/arch/arm64/kernel/cpu_errata.c
++++ b/arch/arm64/kernel/cpu_errata.c
+@@ -19,6 +19,21 @@
+ #include <linux/smp.h>
+ #endif
+ 
++static inline bool is_midr_in_range(struct midr_range const *range)
++{
++	return midr_is_cpu_model_range(read_cpuid_id(), range->model,
++				       range->rv_min, range->rv_max);
++}
++
++bool is_midr_in_range_list(struct midr_range const *ranges)
++{
++	while (ranges->model)
++		if (is_midr_in_range(ranges++))
++			return true;
++	return false;
++}
++EXPORT_SYMBOL_GPL(is_midr_in_range_list);
++
+ static bool __maybe_unused
+ __is_affected_midr_range(const struct arm64_cpu_capabilities *entry,
+ 						u32 midr, u32 revidr)
+@@ -76,7 +91,7 @@ hisilicon_1980005_match(const struct arm64_cpu_capabilities *entry,
+ 		{ /* sentinel */ }
+ 	};
+ 
+-	return is_midr_in_range_list(read_cpuid_id(), idc_support_list);
++	return is_midr_in_range_list(idc_support_list);
+ }
+ 
+ static void
+diff --git a/arch/arm64/kernel/image-vars.h b/arch/arm64/kernel/image-vars.h
+index ef942592d767..a116f715dc72 100644
+--- a/arch/arm64/kernel/image-vars.h
++++ b/arch/arm64/kernel/image-vars.h
+@@ -34,6 +34,10 @@ PROVIDE(__pi___memcpy			= __pi_memcpy);
+ PROVIDE(__pi___memmove			= __pi_memmove);
+ PROVIDE(__pi___memset			= __pi_memset);
+ 
++#ifdef CONFIG_CAVIUM_ERRATUM_27456
++PROVIDE(__pi_is_midr_in_range_list	= is_midr_in_range_list);
++ #endif
++
+ #ifdef CONFIG_KVM
+ 
+ /*
+diff --git a/arch/arm64/kvm/vgic/vgic-v3.c b/arch/arm64/kvm/vgic/vgic-v3.c
+index 67033518da76..aef8c85b3abf 100644
+--- a/arch/arm64/kvm/vgic/vgic-v3.c
++++ b/arch/arm64/kvm/vgic/vgic-v3.c
+@@ -640,7 +640,7 @@ static const struct midr_range broken_seis[] = {
+ static bool vgic_v3_broken_seis(void)
+ {
+ 	return ((kvm_vgic_global_state.ich_vtr_el2 & ICH_VTR_SEIS_MASK) &&
+-		is_midr_in_range_list(read_cpuid_id(), broken_seis));
++		is_midr_in_range_list(broken_seis));
+ }
+ 
+ /**
+-- 
+2.43.0
+

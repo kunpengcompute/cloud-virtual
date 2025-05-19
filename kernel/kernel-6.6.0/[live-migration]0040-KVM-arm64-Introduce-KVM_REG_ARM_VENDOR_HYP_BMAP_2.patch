@@ -1,0 +1,151 @@
+From 103cabf8979d999379b85e7b4e748828a525b29d Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:16:40 +0800
+Subject: [PATCH 40/50] KVM: arm64: Introduce KVM_REG_ARM_VENDOR_HYP_BMAP_2
+
+---
+ Documentation/virt/kvm/arm/hypercalls.rst | 15 ++++++++++++++-
+ arch/arm64/include/asm/kvm_host.h         |  3 ++-
+ arch/arm64/include/uapi/asm/kvm.h         | 12 ++++++++++++
+ arch/arm64/kvm/hypercalls.c               | 13 +++++++++++++
+ 4 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/virt/kvm/arm/hypercalls.rst b/Documentation/virt/kvm/arm/hypercalls.rst
+index 89d8e519426c..2a31b05e74ae 100644
+--- a/Documentation/virt/kvm/arm/hypercalls.rst
++++ b/Documentation/virt/kvm/arm/hypercalls.rst
+@@ -116,7 +116,7 @@ The pseudo-firmware bitmap register are as follows:
+       ARM DEN0057A.
+ 
+ * KVM_REG_ARM_VENDOR_HYP_BMAP:
+-    Controls the bitmap of the Vendor specific Hypervisor Service Calls.
++    Controls the bitmap of the Vendor specific Hypervisor Service Calls[0-63].
+ 
+   The following bits are accepted:
+ 
+@@ -127,6 +127,19 @@ The pseudo-firmware bitmap register are as follows:
+     Bit-1: KVM_REG_ARM_VENDOR_HYP_BIT_PTP:
+       The bit represents the Precision Time Protocol KVM service.
+ 
++* KVM_REG_ARM_VENDOR_HYP_BMAP_2:
++    Controls the bitmap of the Vendor specific Hypervisor Service Calls[64-127].
++
++  The following bits are accepted:
++
++    Bit-0: KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_VER
++      This represents the ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_VER_FUNC_ID
++      function-id. This is reset to 0.
++
++    Bit-1: KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_CPUS
++      This represents the ARM_SMCCC_VENDOR_HYP_KVM_DISCOVER_IMPL_CPUS_FUNC_ID
++      function-id. This is reset to 0.
++
+ Errors:
+ 
+     =======  =============================================================
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index a84cf5117612..2c7b548e988d 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -197,7 +197,8 @@ struct kvm_arch_memory_slot {
+ struct kvm_smccc_features {
+ 	unsigned long std_bmap;
+ 	unsigned long std_hyp_bmap;
+-	unsigned long vendor_hyp_bmap;
++	unsigned long vendor_hyp_bmap; /* Function numbers 0-63 */
++	unsigned long vendor_hyp_bmap_2; /* Function numbers 64-127 */
+ };
+ 
+ typedef unsigned int pkvm_handle_t;
+diff --git a/arch/arm64/include/uapi/asm/kvm.h b/arch/arm64/include/uapi/asm/kvm.h
+index 03b027856818..a40148d52b83 100644
+--- a/arch/arm64/include/uapi/asm/kvm.h
++++ b/arch/arm64/include/uapi/asm/kvm.h
+@@ -372,6 +372,7 @@ enum {
+ #endif
+ };
+ 
++/* Vendor hyper call function numbers 0-63 */
+ #define KVM_REG_ARM_VENDOR_HYP_BMAP		KVM_REG_ARM_FW_FEAT_BMAP_REG(2)
+ 
+ enum {
+@@ -382,6 +383,17 @@ enum {
+ #endif
+ };
+ 
++/* Vendor hyper call function numbers 64-127 */
++#define KVM_REG_ARM_VENDOR_HYP_BMAP_2		KVM_REG_ARM_FW_FEAT_BMAP_REG(3)
++
++enum {
++	KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_VER	= 0,
++	KVM_REG_ARM_VENDOR_HYP_BIT_DISCOVER_IMPL_CPUS	= 1,
++#ifdef __KERNEL__
++	KVM_REG_ARM_VENDOR_HYP_BMAP_2_BIT_COUNT,
++#endif
++};
++
+ /* Device Control API on vm fd */
+ #define KVM_ARM_VM_SMCCC_CTRL		0
+ #define   KVM_ARM_VM_SMCCC_FILTER	0
+diff --git a/arch/arm64/kvm/hypercalls.c b/arch/arm64/kvm/hypercalls.c
+index ca8478851eae..25f1cbe68dfc 100644
+--- a/arch/arm64/kvm/hypercalls.c
++++ b/arch/arm64/kvm/hypercalls.c
+@@ -15,6 +15,8 @@
+ 	GENMASK(KVM_REG_ARM_STD_HYP_BMAP_BIT_COUNT - 1, 0)
+ #define KVM_ARM_SMCCC_VENDOR_HYP_FEATURES			\
+ 	GENMASK(KVM_REG_ARM_VENDOR_HYP_BMAP_BIT_COUNT - 1, 0)
++#define KVM_ARM_SMCCC_VENDOR_HYP_FEATURES_2			\
++	GENMASK(KVM_REG_ARM_VENDOR_HYP_BMAP_2_BIT_COUNT - 1, 0)
+ 
+ static void kvm_ptp_get_time(struct kvm_vcpu *vcpu, u64 *val)
+ {
+@@ -371,6 +373,8 @@ int kvm_smccc_call_handler(struct kvm_vcpu *vcpu)
+ 		break;
+ 	case ARM_SMCCC_VENDOR_HYP_KVM_FEATURES_FUNC_ID:
+ 		val[0] = smccc_feat->vendor_hyp_bmap;
++		/* Function numbers 2-63 are reserved for pKVM for now */
++		val[2] = smccc_feat->vendor_hyp_bmap_2;
+ 		break;
+ 	case ARM_SMCCC_VENDOR_HYP_KVM_PTP_FUNC_ID:
+ 		kvm_ptp_get_time(vcpu, val);
+@@ -398,6 +402,7 @@ static const u64 kvm_arm_fw_reg_ids[] = {
+ 	KVM_REG_ARM_STD_BMAP,
+ 	KVM_REG_ARM_STD_HYP_BMAP,
+ 	KVM_REG_ARM_VENDOR_HYP_BMAP,
++	KVM_REG_ARM_VENDOR_HYP_BMAP_2,
+ };
+ 
+ void kvm_arm_init_hypercalls(struct kvm *kvm)
+@@ -508,6 +513,9 @@ int kvm_arm_get_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
+ 	case KVM_REG_ARM_VENDOR_HYP_BMAP:
+ 		val = READ_ONCE(smccc_feat->vendor_hyp_bmap);
+ 		break;
++	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
++		val = READ_ONCE(smccc_feat->vendor_hyp_bmap_2);
++		break;
+ 	default:
+ 		return -ENOENT;
+ 	}
+@@ -538,6 +546,10 @@ static int kvm_arm_set_fw_reg_bmap(struct kvm_vcpu *vcpu, u64 reg_id, u64 val)
+ 		fw_reg_bmap = &smccc_feat->vendor_hyp_bmap;
+ 		fw_reg_features = KVM_ARM_SMCCC_VENDOR_HYP_FEATURES;
+ 		break;
++	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
++		fw_reg_bmap = &smccc_feat->vendor_hyp_bmap_2;
++		fw_reg_features = KVM_ARM_SMCCC_VENDOR_HYP_FEATURES_2;
++		break;
+ 	default:
+ 		return -ENOENT;
+ 	}
+@@ -642,6 +654,7 @@ int kvm_arm_set_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
+ 	case KVM_REG_ARM_STD_BMAP:
+ 	case KVM_REG_ARM_STD_HYP_BMAP:
+ 	case KVM_REG_ARM_VENDOR_HYP_BMAP:
++	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
+ 		return kvm_arm_set_fw_reg_bmap(vcpu, reg->id, val);
+ 	default:
+ 		return -ENOENT;
+-- 
+2.43.0
+

@@ -1,0 +1,60 @@
+From 1ac23c65fe6c601664ef1a9a915f08dd7dee06e7 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Thu, 15 May 2025 15:15:17 +0800
+Subject: [PATCH 37/50] arm64: Kill detection of VPIPT i-cache policy
+
+---
+ arch/arm64/include/asm/cache.h | 6 ------
+ arch/arm64/kernel/cpuinfo.c    | 5 -----
+ 2 files changed, 11 deletions(-)
+
+diff --git a/arch/arm64/include/asm/cache.h b/arch/arm64/include/asm/cache.h
+index 8455df351ef8..1e699ebc78fa 100644
+--- a/arch/arm64/include/asm/cache.h
++++ b/arch/arm64/include/asm/cache.h
+@@ -64,7 +64,6 @@ static inline unsigned int arch_slab_minalign(void)
+ #define CTR_L1IP(ctr)		SYS_FIELD_GET(CTR_EL0, L1Ip, ctr)
+ 
+ #define ICACHEF_ALIASING	0
+-#define ICACHEF_VPIPT		1
+ extern unsigned long __icache_flags;
+ 
+ /*
+@@ -76,11 +75,6 @@ static inline int icache_is_aliasing(void)
+ 	return test_bit(ICACHEF_ALIASING, &__icache_flags);
+ }
+ 
+-static __always_inline int icache_is_vpipt(void)
+-{
+-	return test_bit(ICACHEF_VPIPT, &__icache_flags);
+-}
+-
+ static inline u32 cache_type_cwg(void)
+ {
+ 	return SYS_FIELD_GET(CTR_EL0, CWG, read_cpuid_cachetype());
+diff --git a/arch/arm64/kernel/cpuinfo.c b/arch/arm64/kernel/cpuinfo.c
+index 7466b6066d87..62e1bb0d3977 100644
+--- a/arch/arm64/kernel/cpuinfo.c
++++ b/arch/arm64/kernel/cpuinfo.c
+@@ -36,8 +36,6 @@ static struct cpuinfo_arm64 boot_cpu_data;
+ static inline const char *icache_policy_str(int l1ip)
+ {
+ 	switch (l1ip) {
+-	case CTR_EL0_L1Ip_VPIPT:
+-		return "VPIPT";
+ 	case CTR_EL0_L1Ip_VIPT:
+ 		return "VIPT";
+ 	case CTR_EL0_L1Ip_PIPT:
+@@ -385,9 +383,6 @@ static void cpuinfo_detect_icache_policy(struct cpuinfo_arm64 *info)
+ 	switch (l1ip) {
+ 	case CTR_EL0_L1Ip_PIPT:
+ 		break;
+-	case CTR_EL0_L1Ip_VPIPT:
+-		set_bit(ICACHEF_VPIPT, &__icache_flags);
+-		break;
+ 	case CTR_EL0_L1Ip_VIPT:
+ 	default:
+ 		/* Assume aliasing */
+-- 
+2.43.0
+
