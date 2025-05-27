@@ -1,0 +1,127 @@
+From 923b75b1dc0d7117a4389297458afd6b4d16bd35 Mon Sep 17 00:00:00 2001
+
+Date: Wed, 30 Apr 2025 11:41:05 +0800
+Subject: [PATCH] rte_memcpy_64.h :SVE instruction acceleration rte_memcpy SVE
+ is used to accelerate memory copy, which is advantageous in cache scenarios.
+ You can use the compilation option RTE_ARCH_ARM64_SVE_MEMCPY to enable it
+ based on the actual scenario.
+
+
+---
+ config/arm/meson.build              |  3 +-
+ lib/eal/arm/include/rte_memcpy_64.h | 79 ++++++++++++++++++++++++++++-
+ 2 files changed, 79 insertions(+), 3 deletions(-)
+
+diff --git a/config/arm/meson.build b/config/arm/meson.build
+index 1e66434..3e26685 100644
+--- a/config/arm/meson.build
++++ b/config/arm/meson.build
+@@ -21,7 +21,8 @@ flags_common = [
+         # ['RTE_ARM_USE_WFE', false],
+ 
+         ['RTE_ARCH_ARM64', true],
+-        ['RTE_CACHE_LINE_SIZE', 128]
++        ['RTE_CACHE_LINE_SIZE', 128],
++        ['RTE_ARCH_ARM64_SVE_MEMCPY', true]
+ ]
+ 
+ ## Part numbers are specific to Arm implementers
+diff --git a/lib/eal/arm/include/rte_memcpy_64.h b/lib/eal/arm/include/rte_memcpy_64.h
+index 9003903..6e11c07 100644
+--- a/lib/eal/arm/include/rte_memcpy_64.h
++++ b/lib/eal/arm/include/rte_memcpy_64.h
+@@ -328,7 +328,82 @@ void *rte_memcpy(void *dst, const void *src, size_t n)
+ }
+ #endif
+ 
+-#else /* RTE_ARCH_ARM64_MEMCPY */
++#elif defined(RTE_ARCH_ARM64_SVE_MEMCPY) /* RTE_ARCH_ARM64_MEMCPY */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++static inline void
++rte_mov16(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 16);
++}
++
++static inline void
++rte_mov32(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 32);
++}
++
++static inline void
++rte_mov48(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 48);
++}
++
++static inline void
++rte_mov64(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 64);
++}
++
++static inline void
++rte_mov128(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 128);
++}
++
++static inline void
++rte_mov256(uint8_t *dst, const uint8_t *src)
++{
++	memcpy(dst, src, 256);
++}
++
++#include "arm_sve.h"
++static inline void *rte_memcpy(void *dst, const void *src, size_t n)
++{
++	size_t vl = svcntb();
++	size_t dvl = 2 * vl;
++	size_t copied = 0;
++
++	while (copied + dvl <= n) {
++		svbool_t pg = svptrue_b8();
++		svuint8_t data = svld1(pg, (const uint8_t*)src + copied);
++		svuint8_t data1 = svld1(pg, (const uint8_t*)src + copied + vl);
++		svst1(pg, (uint8_t*)dst + copied, data);
++		svst1(pg, (uint8_t*)dst + copied + vl, data1);
++		copied += dvl;
++	}
++
++	if (copied < n ) {
++		if (copied + vl >= n) {
++			svbool_t pg = svwhilelt_b8((uint64_t)copied, (uint64_t)n);
++			svuint8_t data = svld1_u8(pg, (const uint8_t*)src + copied);
++			svst1_u8(pg, (uint8_t*)dst + copied, data);
++		} else {
++			memcpy((uint8_t*)dst + copied, (const uint8_t*)src + copied, n - copied);
++		}
++	}
++
++	return dst;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#else /* RTE_ARCH_ARM64_SVE_MEMCPY */
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -376,6 +451,6 @@ rte_mov256(uint8_t *dst, const uint8_t *src)
+ }
+ #endif
+ 
+-#endif /* RTE_ARCH_ARM64_MEMCPY */
++#endif /* RTE_ARCH_ARM64_SVE_MEMCPY */
+ 
+ #endif /* _RTE_MEMCPY_ARM_64_H_ */
+-- 
+2.43.0
+
