@@ -1,0 +1,209 @@
+From 313168167d490653e030d8016d4476140bc4b3c6 Mon Sep 17 00:00:00 2001
+
+Date: Thu, 1 May 2025 02:56:01 +0800
+Subject: [PATCH] dpif-netdev.c: Adding a new transmission mode
+ TXQ_REQ_MODE_TXFOLLOWRX
+
+Add queue selection mode Records the queue and 5-tuple information about
+the last received data. When a data packet is sent,the queue ID is obtained
+based on the quintuple. This ensures that no IPI interrupt is triggered
+during data processing on VMs, it can reduce network latency.
+
+---
+ lib/dpif-netdev.c | 121 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 121 insertions(+)
+
+diff --git a/lib/dpif-netdev.c b/lib/dpif-netdev.c
+index 87d69c4..a6f9357 100644
+--- a/lib/dpif-netdev.c
++++ b/lib/dpif-netdev.c
+@@ -33,6 +33,8 @@
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
++#include <rte_hash.h>
++#include <rte_jhash.h>
+ 
+ #include "bitmap.h"
+ #include "ccmap.h"
+@@ -438,6 +440,25 @@ dp_netdev_offload_init(void)
+     ovsthread_once_done(&once);
+ }
+ 
++#define DPIF_NETDEV_HASH_TABLE_ENTRIES 100000
++
++static struct rte_hash *dpif_netdev_tuple_hash_table = NULL;
++
++typedef struct dpif_netdev_tuple_key {
++    uint32_t src_ip;
++    uint32_t dst_ip;
++    uint16_t src_port;
++    uint16_t dst_port;
++    uint8_t proto;
++} dpif_netdev_tuple_key_t;
++
++static struct rte_hash *dpif_netdev_tuple_table_create(const char *name);
++static dpif_netdev_tuple_key_t dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, bool tx);
++static int
++dpif_netdev_tuple_table_insert(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int queue_id);
++static int
++dpif_netdev_tuple_table_lookup(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int *queue_id);
++
+ #define XPS_TIMEOUT 500000LL    /* In microseconds. */
+ 
+ /* Contained by struct dp_netdev_port's 'rxqs' member.  */
+@@ -462,12 +483,14 @@ struct dp_netdev_rxq {
+ enum txq_req_mode {
+     TXQ_REQ_MODE_THREAD,
+     TXQ_REQ_MODE_HASH,
++    TXQ_REQ_MODE_TXFOLLOWRX,
+ };
+ 
+ enum txq_mode {
+     TXQ_MODE_STATIC,
+     TXQ_MODE_XPS,
+     TXQ_MODE_XPS_HASH,
++    TXQ_MODE_XPS_TXFOLLOWRX,
+ };
+ 
+ /* A port in a netdev-based datapath. */
+@@ -5409,6 +5432,10 @@ dpif_netdev_port_set_config(struct dpif *dpif, odp_port_t port_no,
+ 
+     if (nullable_string_is_equal(tx_steering_mode, "hash")) {
+         txq_mode = TXQ_REQ_MODE_HASH;
++    } else if(nullable_string_is_equal(tx_steering_mode, "txfollowrx")) {
++        txq_mode = TXQ_REQ_MODE_TXFOLLOWRX;
++        dpif_netdev_tuple_hash_table = dpif_netdev_tuple_hash_table == NULL ?
++            dpif_netdev_tuple_table_create("queue_tuple_relation_table") : dpif_netdev_tuple_hash_table;
+     } else {
+         txq_mode = TXQ_REQ_MODE_THREAD;
+     }
+@@ -5567,6 +5594,13 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
+             netdev_send(p->port->netdev, i, &p->txq_pkts[i], true);
+             dp_packet_batch_init(&p->txq_pkts[i]);
+         }
++    } else if (p->port->txq_mode == TXQ_MODE_XPS_TXFOLLOWRX) {
++        dpif_netdev_tuple_key_t key =
++        dpif_netdev_tuple_key_extract((struct rte_mbuf *) p->output_pkts.packets[0], true);
++        if (dpif_netdev_tuple_table_lookup(dpif_netdev_tuple_hash_table, &key, &tx_qid) < 0)
++            tx_qid = pmd->static_tx_qid;
++        concurrent_txqs = true;
++        netdev_send(p->port->netdev, tx_qid, &p->output_pkts, concurrent_txqs);
+     } else {
+         if (p->port->txq_mode == TXQ_MODE_XPS) {
+             tx_qid = dpif_netdev_xps_get_tx_qid(pmd, p);
+@@ -5665,6 +5699,12 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
+             }
+         }
+ 
++        if (rxq->port->txq_mode == TXQ_MODE_XPS_TXFOLLOWRX) {
++            dpif_netdev_tuple_key_t key =
++                dpif_netdev_tuple_key_extract((struct rte_mbuf *) batch.packets[0], false);
++            dpif_netdev_tuple_table_insert(dpif_netdev_tuple_hash_table, &key, rxq->rx->queue_id);
++        }
++
+         /* Process packet batch. */
+         int ret = pmd->netdev_input_func(pmd, &batch, port_no);
+         if (ret) {
+@@ -6769,6 +6809,9 @@ reconfigure_datapath(struct dp_netdev *dp)
+                 != (netdev_n_txq(port->netdev) < wanted_txqs))
+             || ((port->txq_mode == TXQ_MODE_XPS_HASH)
+                 != (port->txq_requested_mode == TXQ_REQ_MODE_HASH
++                    && netdev_n_txq(port->netdev) > 1))
++            || ((port->txq_mode == TXQ_MODE_XPS_TXFOLLOWRX)
++                != (port->txq_requested_mode == TXQ_REQ_MODE_TXFOLLOWRX
+                     && netdev_n_txq(port->netdev) > 1))) {
+             port->need_reconfigure = true;
+         }
+@@ -6807,6 +6850,9 @@ reconfigure_datapath(struct dp_netdev *dp)
+             if (port->txq_requested_mode == TXQ_REQ_MODE_HASH &&
+                 netdev_n_txq(port->netdev) > 1) {
+                 port->txq_mode = TXQ_MODE_XPS_HASH;
++            } else if(port->txq_requested_mode == TXQ_REQ_MODE_TXFOLLOWRX &&
++                netdev_n_txq(port->netdev) > 1) {
++                port->txq_mode = TXQ_MODE_XPS_TXFOLLOWRX;
+             } else if (netdev_n_txq(port->netdev) < wanted_txqs) {
+                 port->txq_mode = TXQ_MODE_XPS;
+             } else {
+@@ -10574,3 +10620,78 @@ dpcls_lookup(struct dpcls *cls, const struct netdev_flow_key *keys[],
+     }
+     return false;
+ }
++
++static struct rte_hash *dpif_netdev_tuple_table_create(const char *name)
++{
++    struct rte_hash_parameters params = {
++        .name = name,
++        .entries = DPIF_NETDEV_HASH_TABLE_ENTRIES,
++        .key_len = sizeof(dpif_netdev_tuple_key_t),
++        .hash_func = rte_jhash,
++        .hash_func_init_val = 0,
++        .extra_flag = RTE_HASH_EXTRA_FLAGS_MULTI_WRITER_ADD |
++                RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY
++    };
++    return rte_hash_create(&params);
++}
++
++static dpif_netdev_tuple_key_t dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, bool tx)
++{
++    dpif_netdev_tuple_key_t key = {0};
++    struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
++    uint16_t ether_type = rte_be_to_cpu_16(eth_hdr->ether_type);
++
++    if (ether_type == RTE_ETHER_TYPE_IPV4) {
++        struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
++
++        key.src_ip = tx ? ipv4_hdr->src_addr : ipv4_hdr->dst_addr;
++        key.dst_ip = tx ? ipv4_hdr->src_addr : ipv4_hdr->dst_addr;
++        key.proto = ipv4_hdr->next_proto_id;
++
++        if (key.proto == IPPROTO_TCP) {
++            struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr + 1);
++            key.src_port = tx ? tcp_hdr->src_port : tcp_hdr->dst_port;
++            key.dst_port = tx ? tcp_hdr->src_port : tcp_hdr->dst_port;
++        } else if (key.proto == IPPROTO_UDP) {
++            struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr + 1);
++            key.src_port = tx ? udp_hdr->src_port : udp_hdr->dst_port;
++            key.dst_port = tx ? udp_hdr->src_port : udp_hdr->dst_port;
++        }
++    } else if (ether_type == RTE_ETHER_TYPE_IPV6) {
++
++    }
++
++    return key;
++}
++
++static int
++dpif_netdev_tuple_table_insert(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int queue_id)
++{
++    if (handle == NULL ||
++        (key->proto != IPPROTO_TCP && key->proto != IPPROTO_UDP)) {
++        return -1;
++    }
++    int ret = rte_hash_add_key_data(handle, key, (void *)(uintptr_t)queue_id);
++    if (ret == -ENOSPC) {
++        rte_hash_reset(handle);
++        rte_hash_add_key_data(handle, key, (void *)(uintptr_t)queue_id);
++    }
++
++    return (ret == -ENOSPC) ? -1 : ret;
++}
++
++static int
++dpif_netdev_tuple_table_lookup(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int *queue_id)
++{
++    void *data;
++    if (handle == NULL)
++        return -1;
++
++    int ret = rte_hash_lookup_data(handle, key, &data);
++    if (ret >= 0) {
++        *queue_id = (int)(uintptr_t)data;
++        return 0;
++    }
++
++    return -1;
++}
+-- 
+2.43.0
+
