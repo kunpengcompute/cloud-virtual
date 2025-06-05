@@ -1,6 +1,5 @@
-From 313168167d490653e030d8016d4476140bc4b3c6 Mon Sep 17 00:00:00 2001
-
-Date: Thu, 1 May 2025 02:56:01 +0800
+From 6acd8d1c88c0ab146adf5875be5645299f9f8ebd Mon Sep 17 00:00:00 2001
+Date: Fri, 30 May 2025 03:11:04 +0800
 Subject: [PATCH] dpif-netdev.c: Adding a new transmission mode
  TXQ_REQ_MODE_TXFOLLOWRX
 
@@ -8,13 +7,12 @@ Add queue selection mode Records the queue and 5-tuple information about
 the last received data. When a data packet is sent,the queue ID is obtained
 based on the quintuple. This ensures that no IPI interrupt is triggered
 during data processing on VMs, it can reduce network latency.
-
 ---
- lib/dpif-netdev.c | 121 ++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 121 insertions(+)
+ lib/dpif-netdev.c | 124 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 124 insertions(+)
 
 diff --git a/lib/dpif-netdev.c b/lib/dpif-netdev.c
-index 87d69c4..a6f9357 100644
+index 87d69c4..6adf3bb 100644
 --- a/lib/dpif-netdev.c
 +++ b/lib/dpif-netdev.c
 @@ -33,6 +33,8 @@
@@ -43,7 +41,7 @@ index 87d69c4..a6f9357 100644
 +} dpif_netdev_tuple_key_t;
 +
 +static struct rte_hash *dpif_netdev_tuple_table_create(const char *name);
-+static dpif_netdev_tuple_key_t dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, bool tx);
++static void dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, dpif_netdev_tuple_key_t *src_key, bool tx);
 +static int
 +dpif_netdev_tuple_table_insert(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int queue_id);
 +static int
@@ -83,8 +81,8 @@ index 87d69c4..a6f9357 100644
              dp_packet_batch_init(&p->txq_pkts[i]);
          }
 +    } else if (p->port->txq_mode == TXQ_MODE_XPS_TXFOLLOWRX) {
-+        dpif_netdev_tuple_key_t key =
-+        dpif_netdev_tuple_key_extract((struct rte_mbuf *) p->output_pkts.packets[0], true);
++        dpif_netdev_tuple_key_t key;
++        dpif_netdev_tuple_key_extract((struct rte_mbuf *) p->output_pkts.packets[0], &key, true);
 +        if (dpif_netdev_tuple_table_lookup(dpif_netdev_tuple_hash_table, &key, &tx_qid) < 0)
 +            tx_qid = pmd->static_tx_qid;
 +        concurrent_txqs = true;
@@ -97,8 +95,8 @@ index 87d69c4..a6f9357 100644
          }
  
 +        if (rxq->port->txq_mode == TXQ_MODE_XPS_TXFOLLOWRX) {
-+            dpif_netdev_tuple_key_t key =
-+                dpif_netdev_tuple_key_extract((struct rte_mbuf *) batch.packets[0], false);
++            dpif_netdev_tuple_key_t key;
++            dpif_netdev_tuple_key_extract((struct rte_mbuf *) batch.packets[0], &key, false);
 +            dpif_netdev_tuple_table_insert(dpif_netdev_tuple_hash_table, &key, rxq->rx->queue_id);
 +        }
 +
@@ -125,7 +123,7 @@ index 87d69c4..a6f9357 100644
              } else if (netdev_n_txq(port->netdev) < wanted_txqs) {
                  port->txq_mode = TXQ_MODE_XPS;
              } else {
-@@ -10574,3 +10620,78 @@ dpcls_lookup(struct dpcls *cls, const struct netdev_flow_key *keys[],
+@@ -10574,3 +10620,81 @@ dpcls_lookup(struct dpcls *cls, const struct netdev_flow_key *keys[],
      }
      return false;
  }
@@ -144,7 +142,7 @@ index 87d69c4..a6f9357 100644
 +    return rte_hash_create(&params);
 +}
 +
-+static dpif_netdev_tuple_key_t dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, bool tx)
++static void dpif_netdev_tuple_key_extract(struct rte_mbuf *mbuf, dpif_netdev_tuple_key_t *src_key,  bool tx)
 +{
 +    dpif_netdev_tuple_key_t key = {0};
 +    struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
@@ -154,23 +152,24 @@ index 87d69c4..a6f9357 100644
 +        struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
 +
 +        key.src_ip = tx ? ipv4_hdr->src_addr : ipv4_hdr->dst_addr;
-+        key.dst_ip = tx ? ipv4_hdr->src_addr : ipv4_hdr->dst_addr;
++        key.dst_ip = tx ? ipv4_hdr->dst_addr : ipv4_hdr->src_addr;
 +        key.proto = ipv4_hdr->next_proto_id;
 +
 +        if (key.proto == IPPROTO_TCP) {
 +            struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr + 1);
 +            key.src_port = tx ? tcp_hdr->src_port : tcp_hdr->dst_port;
-+            key.dst_port = tx ? tcp_hdr->src_port : tcp_hdr->dst_port;
++            key.dst_port = tx ? tcp_hdr->dst_port : tcp_hdr->src_port;
 +        } else if (key.proto == IPPROTO_UDP) {
 +            struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr + 1);
 +            key.src_port = tx ? udp_hdr->src_port : udp_hdr->dst_port;
-+            key.dst_port = tx ? udp_hdr->src_port : udp_hdr->dst_port;
++            key.dst_port = tx ? udp_hdr->dst_port : udp_hdr->src_port;
 +        }
 +    } else if (ether_type == RTE_ETHER_TYPE_IPV6) {
 +
 +    }
++    memcpy(src_key, &key, sizeof(dpif_netdev_tuple_key_t));
 +
-+    return key;
++    return;
 +}
 +
 +static int
@@ -180,6 +179,7 @@ index 87d69c4..a6f9357 100644
 +        (key->proto != IPPROTO_TCP && key->proto != IPPROTO_UDP)) {
 +        return -1;
 +    }
++
 +    int ret = rte_hash_add_key_data(handle, key, (void *)(uintptr_t)queue_id);
 +    if (ret == -ENOSPC) {
 +        rte_hash_reset(handle);
@@ -192,8 +192,8 @@ index 87d69c4..a6f9357 100644
 +static int
 +dpif_netdev_tuple_table_lookup(struct rte_hash *handle, const dpif_netdev_tuple_key_t *key, int *queue_id)
 +{
-+    void *data;
-+    if (handle == NULL)
++   void *data;
++   if (handle == NULL)
 +        return -1;
 +
 +    int ret = rte_hash_lookup_data(handle, key, &data);
@@ -204,6 +204,7 @@ index 87d69c4..a6f9357 100644
 +
 +    return -1;
 +}
++
 -- 
 2.43.0
 
