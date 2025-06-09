@@ -1,0 +1,30 @@
+From 95d0fb84da2e7caa4500f9e9f5c1a2c2e70211dc Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Mon, 9 Jun 2025 21:13:52 +0800
+Subject: [PATCH] bugfix: fixed a potential issue with out-of-bound access to
+ an array
+
+---
+ hw/arm/virt.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index 426d80f390..50b5bb2301 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -2945,6 +2945,12 @@ void parse_denied_events(VirtMachineState *vms, const PmuEventList *events,
+             vms->event_info.bmap[1] |= (1UL << (type_id - ARMV8_SPE_PERFCTR_SAMPLE_POP));
+         }
+         i++;
++        if (i == ARM_PMU_EVENT_MAX_NUM && node->next) {
++            error_setg(errp,
++                   "The number of events has exceeded the maximum limit 128.");
++            error_append_hint(errp, "Please check the parameters denied-events-type.\n");
++            return;
++        }
+     }
+ }
+ 
+-- 
+2.43.0
+
