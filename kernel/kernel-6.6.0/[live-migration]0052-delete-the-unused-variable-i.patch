@@ -1,0 +1,24 @@
+From 3aa7788e8436fa77d05874b970886d1ef360fe70 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Mon, 9 Jun 2025 21:48:21 +0800
+Subject: [PATCH] delete the unused variable i
+
+---
+ arch/arm64/kvm/sys_regs.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 5a2b8d2566cb..fdc25903ce9e 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -4258,7 +4258,6 @@ int kvm_finalize_sys_regs(struct kvm_vcpu *vcpu)
+ int __init kvm_sys_reg_table_init(void)
+ {
+ 	bool valid = true;
+-	unsigned int i;
+ 
+ 	/* Make sure tables are unique and in order. */
+ 	valid &= check_sysreg_table(sys_reg_descs, ARRAY_SIZE(sys_reg_descs), false);
+-- 
+2.43.0
+
