@@ -1,0 +1,26 @@
+From fdf185b7af16ee975e508dacb4de450b803b75f5 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Tue, 10 Jun 2025 20:36:37 +0800
+Subject: [PATCH] bugfix:Fixed a memory leak
+
+---
+ hw/arm/virt.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index 50b5bb2301..7c9adc05eb 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -3277,7 +3277,8 @@ static char *virt_get_pmcr_n(Object *obj, Error **errp)
+     VirtMachineState *vms = VIRT_MACHINE(obj);
+     QNum *qn;
+     qn = qnum_from_int(vms->pmcr_n);
+-    const char *val = qnum_to_string(qn);
++    g_autofree char *val = qnum_to_string(qn);
++    qobject_unref(qn);
+     return g_strdup(val);
+ }
+ 
+-- 
+2.43.0
+
