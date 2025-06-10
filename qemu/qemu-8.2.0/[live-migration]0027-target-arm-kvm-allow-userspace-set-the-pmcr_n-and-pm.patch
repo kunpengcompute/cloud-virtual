@@ -128,7 +128,7 @@ index f05fa08a19..426d80f390 100644
 +    VirtMachineState *vms = VIRT_MACHINE(obj);
 +    int result, err;
 +    err = qemu_strtoi(value, NULL, 10, &result);
-+    if (err < 0 || result < 0 || result > 31) {
++    if (err < 0 || result < 1 || result > 31) {
 +        error_setg(errp, "Invalid pmcr_n value");
 +        error_append_hint(errp, "Valid value is a integer, between 1 and 31.\n");
 +        return;
