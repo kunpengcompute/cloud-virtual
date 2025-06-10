@@ -4,16 +4,17 @@ import sys
 import logging
 
 
+logging.basicConfig(level=logging.INFO)
 def apply_patches(patch_dir):
     if not os.path.isdir(patch_dir):
-        logging.info(f"错误：指定的路径 '{patch_dir}' 不是一个有效的文件夹。")
+        logging.error(f"错误：指定的路径 '{patch_dir}' 不是一个有效的文件夹。")
         return
 
 # 获取所有 .patch 文件并按文件名排序
     patches = sorted(f for f in os.listdir(patch_dir) if f.endswith('.patch'))
 
     if not patches:
-        logging.info("未找到任何 .patch 文件。")
+        logging.error("未找到任何 .patch 文件。")
         return
 
     logging.info(f"发现 {len(patches)} 个补丁，开始依次应用...")
@@ -24,12 +25,12 @@ def apply_patches(patch_dir):
         try:
             subprocess.run(['git', 'apply', patch_path], check=True)
         except subprocess.CalledProcessError:
-            logging.info(f"应用补丁 {patch} 失败。请手动处理冲突。")
+            logging.error(f"应用补丁 {patch} 失败。请手动处理冲突。")
             break
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        logging.info("用法：python [live-migration]apply_patches.py <patch目录路径>")
+        logging.error("用法：python [live-migration]apply_patches.py <patch目录路径>")
     else:
         patch_directory = sys.argv[1]
         apply_patches(patch_directory)
