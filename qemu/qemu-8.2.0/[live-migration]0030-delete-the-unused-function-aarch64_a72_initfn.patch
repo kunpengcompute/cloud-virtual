@@ -1,0 +1,88 @@
+From 4be6d9314636c53e86a0119990a0561e02e201f6 Mon Sep 17 00:00:00 2001
+From: lutong <11589481+luckye1@user.noreply.gitee.com>
+Date: Mon, 9 Jun 2025 21:22:35 +0800
+Subject: [PATCH] delete the unused function aarch64_a72_initfn
+
+---
+ target/arm/cpu64.c | 58 ----------------------------------------------
+ 1 file changed, 58 deletions(-)
+
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 7d12b1ce01..217c91898d 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -725,59 +725,6 @@ static void aarch64_a53_initfn(Object *obj)
+     define_cortex_a72_a57_a53_cp_reginfo(cpu);
+ }
+ 
+-static void aarch64_a72_initfn(Object *obj)
+-{
+-    ARMCPU *cpu = ARM_CPU(obj);
+-    ARMISARegisters *isar = &cpu->isar;
+-
+-    cpu->dtb_compatible = "arm,cortex-a72";
+-    cpu->kvm_target = QEMU_KVM_ARM_TARGET_GENERIC_V8;
+-    set_feature(&cpu->env, ARM_FEATURE_V8);
+-    set_feature(&cpu->env, ARM_FEATURE_NEON);
+-    set_feature(&cpu->env, ARM_FEATURE_GENERIC_TIMER);
+-    set_feature(&cpu->env, ARM_FEATURE_AARCH64);
+-    set_feature(&cpu->env, ARM_FEATURE_CBAR_RO);
+-    set_feature(&cpu->env, ARM_FEATURE_EL2);
+-    set_feature(&cpu->env, ARM_FEATURE_EL3);
+-    set_feature(&cpu->env, ARM_FEATURE_PMU);
+-    cpu->midr = 0x410fd083;
+-    cpu->revidr = 0x00000000;
+-    cpu->reset_fpsid = 0x41034080;
+-    cpu->isar.mvfr0 = 0x10110222;
+-    cpu->isar.mvfr1 = 0x12111111;
+-    cpu->isar.mvfr2 = 0x00000043;
+-    cpu->ctr = 0x8444c004;
+-    cpu->reset_sctlr = 0x00c50838;
+-    SET_IDREG(isar, ID_PFR0, 0x00000131);
+-    SET_IDREG(isar, ID_PFR1, 0x00011011);
+-    SET_IDREG(isar, ID_DFR0, 0x03010066);
+-    cpu->id_afr0 = 0x00000000;
+-    SET_IDREG(isar, ID_MMFR0, 0x10201105);
+-    SET_IDREG(isar, ID_MMFR1, 0x40000000);
+-    SET_IDREG(isar, ID_MMFR2, 0x01260000);
+-    SET_IDREG(isar, ID_MMFR3, 0x02102211);
+-    SET_IDREG(isar, ID_ISAR0, 0x02101110);
+-    SET_IDREG(isar, ID_ISAR1, 0x13112111);
+-    SET_IDREG(isar, ID_ISAR2, 0x21232042);
+-    SET_IDREG(isar, ID_ISAR3, 0x01112131);
+-    SET_IDREG(isar, ID_ISAR4, 0x00011142);
+-    SET_IDREG(isar, ID_ISAR5, 0x01011121);
+-    SET_IDREG(isar, ID_AA64PFR0, 0x00002222);
+-    SET_IDREG(isar, ID_AA64DFR0, 0x10305106);
+-    SET_IDREG(isar, ID_AA64ISAR0, 0x00011120);
+-    SET_IDREG(isar, ID_AA64MMFR0, 0x00001124);
+-    cpu->isar.dbgdidr = 0x3516d000;
+-    cpu->clidr = 0x0a200023;
+-    cpu->ccsidr[0] = 0x701fe00a; /* 32KB L1 dcache */
+-    cpu->ccsidr[1] = 0x201fe012; /* 48KB L1 icache */
+-    cpu->ccsidr[2] = 0x707fe07a; /* 1MB L2 cache */
+-    cpu->dcz_blocksize = 4; /* 64 bytes */
+-    cpu->gic_num_lrs = 4;
+-    cpu->gic_vpribits = 5;
+-    cpu->gic_vprebits = 5;
+-    define_cortex_a72_a57_a53_cp_reginfo(cpu);
+-}
+-
+ static void aarch64_host_initfn(Object *obj)
+ {
+ #if defined(CONFIG_KVM)
+@@ -820,11 +767,6 @@ static void aarch64_kunpeng_920_initfn(Object *obj)
+ {
+     ARMCPU *cpu = ARM_CPU(obj);
+     ARMISARegisters *isar = &cpu->isar;
+-    /*
+-     * Hisilicon Kunpeng-920 CPU is similar to cortex-a72,
+-     * so first initialize cpu data as cortex-a72,
+-     * and then update the special register.
+-     */
+     aarch64_host_initfn(obj);
+ 
+     cpu->midr = 0x480fd010;
+-- 
+2.43.0
+
