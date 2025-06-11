@@ -1,0 +1,344 @@
+From 6a2d9f0c9e3fbbe80ad4b7b5d0995c8fca47af22 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E8=B0=A2=E6=99=93=E4=B8=9C?= <xiexiaodong16@huawei.com>
+Date: Wed, 11 Jun 2025 10:34:47 +0800
+Subject: [PATCH] [OLK-5.10] net/openvswitch: use L0 memory to accelerate flow
+ match in openvswitch
+
+  This patch is used to accelerate the fast flow table matching mechanism in openvswitch by utilizing L0 memory. It improves flow table matching speed through the placement of flow and flow_stat structure in L0 memory.
+---
+ net/openvswitch/flow.c       |  11 +-
+ net/openvswitch/flow_table.c | 224 +++++++++++++++++++++++++++++++++--
+ net/openvswitch/flow_table.h |   1 +
+ 3 files changed, 220 insertions(+), 16 deletions(-)
+
+diff --git a/net/openvswitch/flow.c b/net/openvswitch/flow.c
+index 9bad601c7fe8..0e2d8984058b 100644
+--- a/net/openvswitch/flow.c
++++ b/net/openvswitch/flow.c
+@@ -41,6 +41,8 @@
+ #include "flow_netlink.h"
+ #include "vport.h"
+
++extern void * alloc_l0_from_pool(struct vm_area_struct * vma);
++
+ u64 ovs_flow_used_time(unsigned long flow_jiffies)
+ {
+ 	struct timespec64 cur_ts;
+@@ -89,13 +91,8 @@ void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
+ 				/* Try to allocate CPU-specific stats. */
+ 				struct sw_flow_stats *new_stats;
+
+-				new_stats =
+-					kmem_cache_alloc_node(flow_stats_cache,
+-							      GFP_NOWAIT |
+-							      __GFP_THISNODE |
+-							      __GFP_NOWARN |
+-							      __GFP_NOMEMALLOC,
+-							      numa_node_id());
++				new_stats = alloc_l0_from_pool(flow_stats_l0);
++
+ 				if (likely(new_stats)) {
+ 					new_stats->used = jiffies;
+ 					new_stats->packet_count = 1;
+diff --git a/net/openvswitch/flow_table.c b/net/openvswitch/flow_table.c
+index c89c8da99f1a..52653470abd0 100644
+--- a/net/openvswitch/flow_table.c
++++ b/net/openvswitch/flow_table.c
+@@ -33,7 +33,178 @@
+ #include <net/ip.h>
+ #include <net/ipv6.h>
+ #include <net/ndisc.h>
++#include <linux/mm.h>
+
++#include <linux/fs.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/miscdevice.h>
++#include <linux/kallsyms.h>
++#include <linux/gfp.h>
++#include <linux/mempolicy.h>
++#include <linux/pfn_t.h>
++#include <linux/spinlock.h>
++
++extern int l3t_shared_lock(int nid, unsigned long pfn, unsigned long size);
++extern int l3t_shared_unlock(int nid, unsigned long pfn, unsigned long size);
++
++#define max_page_size 3072
++#define slot_size 8192
++#define slot_array_len 3072
++spinlock_t memory_lock;
++struct l0_vma_data
++{
++	struct page *page;
++	unsigned long size;
++	int nid;
++	int *slot;
++};
++
++static int get_node_node(struct  vm_area_struct *vma)
++{
++	struct mempolicy *pol;
++	nodemask_t *nmask;
++	int nid;
++
++	nid = get_vma_policy_node(vma, vma->vm_start, GFP_KERNEL, &pol, &nmask);
++	if (pol->mode == MPOL_BIND || pol->mode == MPOL_PREFERRED_MANY)
++		nid = first_node(*nmask);
++	return nid;
++};
++
++static void l0_vma_close(struct vm_area_struct *vma)
++{
++	struct l0_vma_data *data;
++	data = (struct l0_vma_data *)vma->vm_private_data;
++	if (!data)
++		pr_err("%s: pid: %d, invalid private data\n", current->comm,
++			current->pid);
++		return;
++
++	l3t_shared_unlock(data->nid, page_to_pfn(data->page), data->size);
++	free_contig_range(page_to_pfn(data->page), data->size >> PAGE_SHIFT);
++
++	kfree(data->slot);
++	data->slot=NULL;
++	kfree(data);
++}
++
++static const struct vm_operations_struct l0_vm_ops = {
++	.huge_fault = NULL,
++	.close = l0_vma_close,
++};
++
++static int l0_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	unsigned long cont_size = PAGE_ALIGN(vma->vm_end - vma->vm_start);
++	struct l0_vma_data *data;
++	int page_cnt, nid, ret;
++	struct page *page;
++
++	if((vma->vm_start % PMD_SIZE) || (vma->vm_end % PMD_SIZE))
++		return -EINVAL;
++
++	data = kzalloc(sizeof(struct l0_vma_data), GFP_KERNEL);
++	if(!data)
++		return -ENOMEM;
++	page_cnt = cont_size >> PAGE_SHIFT;
++	nid = get_node_node(vma);
++	page = alloc_contig_pages(page_cnt, GFP_KERNEL, nid, NULL);
++	if (!page) {
++		ret = -ENOMEM;
++		goto free_data;
++	}
++	ret = l3t_shared_lock(nid, page_to_pfn(page), cont_size);
++	if (ret) {
++		pr_err("%s: pid: %d, l3t lock failed, ret: %d\n", current->comm,
++			current->pid, ret);
++		ret = -ENOMEM;
++		goto free_page;
++	}
++
++	int *slot_array;
++	int slot_array_size = sizeof(int) * slot_array_len;
++	slot_array = kzalloc(slot_array_size, GFP_KERNEL);
++
++	data->page = page;
++	data->size = cont_size;
++	data->nid = nid;
++	data->slot = slot_array;
++
++	vma->vm_ops = &l0_vm_ops;
++	vma->vm_flags |= (VM_MIXEDMAP | VM_DONTCOPY | VM_DONTEXPAND);
++	vma->vm_private_data = data;
++	return 0;
++free_page:
++	free_contig_range(page_to_pfn(page), page_cnt);
++free_data:
++	kfree(data->slot);
++	data->slot = NULL;
++	kfree(data);
++	return ret;
++}
++
++void * alloc_l0_from_pool(struct vm_area_struct *vma){
++	void *slotblank = NULL;
++	int i = 0;
++	struct l0_vma_data *flowpages = (struct l0_vma_data *)(vma->vm_private_data);
++	if (flowpages == NULL || flowpages->page == NULL){
++		pr_err("%s: pid: %d, alloc_l0_from_pool flowpages or page is null \n", current->comm,
++			current->pid);
++		return NULL;
++	}
++	void *flow1 = page_to_virt(flowpages->page);
++	if (flow1 == NULL){
++		pr_err("%s: pid: %d, alloc_l0_from_pool flow ptr is null \n", current->comm,
++			current->pid);
++		return NULL;
++	}
++	spin_lock(&memory_lock);
++	int *slot = flowpages->slot;
++	for (i = 0; i < slot_array_len; i++){
++		if (slot[i] != 1){
++			slotblank = flow1 + i * slot_size;
++			slot[i] = 1;
++			break;
++		}
++	}
++	memset(slotblank, 0, slot_size);
++	spin_unlock(&memory_lock);
++	return slotblank;
++}
++
++void free_l0_to_pool(struct vm_area_struct *vma, void *addr){
++	if (addr == NULL || vma == NULL){
++		pr_err("%s: pid: %d, free_l0_to_pool param is null \n", current->comm,
++			current->pid);
++		return;
++	}
++	struct l0_vma_data *flowpages = (struct l0_vma_data *)(vma->vm_private_data);
++	if (flowpages == NULL || flowpages->page == NULL){
++		pr_err("%s: pid: %d, free_l0_to_pool flowpages or page is null \n", current->comm,
++			current->pid);
++		return;
++	}
++	void *flow1 = page_to_virt(flowpages->page);
++	if (flow1 == NULL){
++		pr_err("%s: pid: %d, free_l0_to_pool flow ptr is null \n", current->comm,
++			current->pid);
++		return;
++	}
++	int i = (addr - flow1) / slot_size;
++	if (i >= slot_array_len){
++		pr_err("%s: pid: %d, free_l0_to_pool flow index error  \n", current->comm,
++			current->pid);
++		return;
++	}
++	spin_lock(&memory_lock);
++	memset(addr, 0, slot_size);
++	int *slot = flowpages->slot;
++	slot[i] = 0;
++	spin_unlock(&memory_lock);
++
++}
+ #define TBL_MIN_BUCKETS		1024
+ #define MASK_ARRAY_SIZE_MIN	16
+ #define REHASH_INTERVAL		(10 * 60 * HZ)
+@@ -45,6 +216,9 @@
+ static struct kmem_cache *flow_cache;
+ struct kmem_cache *flow_stats_cache __read_mostly;
+
++struct vm_area_struct *flow_cache_l0;
++struct vm_area_struct *flow_stats_l0 __read_mostly;
++
+ static u16 range_n_bytes(const struct sw_flow_key_range *range)
+ {
+ 	return range->end - range->start;
+@@ -74,16 +248,15 @@ struct sw_flow *ovs_flow_alloc(void)
+ 	struct sw_flow *flow;
+ 	struct sw_flow_stats *stats;
+
+-	flow = kmem_cache_zalloc(flow_cache, GFP_KERNEL);
++	flow = alloc_l0_from_pool(flow_cache_l0);
++
+ 	if (!flow)
+ 		return ERR_PTR(-ENOMEM);
+
+ 	flow->stats_last_writer = -1;
+
+-	/* Initialize the default stat node. */
+-	stats = kmem_cache_alloc_node(flow_stats_cache,
+-				      GFP_KERNEL | __GFP_ZERO,
+-				      node_online(0) ? 0 : NUMA_NO_NODE);
++	stats = alloc_l0_from_pool(flow_stats_l0);
++
+ 	if (!stats)
+ 		goto err;
+
+@@ -95,7 +268,7 @@ struct sw_flow *ovs_flow_alloc(void)
+
+ 	return flow;
+ err:
+-	kmem_cache_free(flow_cache, flow);
++	free_l0_to_pool(flow_cache_l0, flow);
+ 	return ERR_PTR(-ENOMEM);
+ }
+
+@@ -117,11 +290,10 @@ static void flow_free(struct sw_flow *flow)
+ 	for (cpu = 0; cpu < nr_cpu_ids;
+ 	     cpu = cpumask_next(cpu, &flow->cpu_used_mask)) {
+ 		if (flow->stats[cpu])
+-			kmem_cache_free(flow_stats_cache,
+-					(struct sw_flow_stats __force *)flow->stats[cpu]);
++			free_l0_to_pool(flow_stats_l0, flow->stats[cpu]);
+ 	}
+
+-	kmem_cache_free(flow_cache, flow);
++	free_l0_to_pool(flow_cache_l0, flow);
+ }
+
+ static void rcu_free_flow_callback(struct rcu_head *rcu)
+@@ -1195,10 +1367,38 @@ int ovs_flow_init(void)
+ 	BUILD_BUG_ON(__alignof__(struct sw_flow_key) % __alignof__(long));
+ 	BUILD_BUG_ON(sizeof(struct sw_flow_key) % sizeof(long));
+
++	flow_cache_l0 = kzalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
++	flow_stats_l0 = kzalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
++
++	flow_cache_l0->vm_start = 0;
++	flow_cache_l0->vm_end = flow_cache_l0->vm_start + 8 * 1024 * max_page_size;
++
++	flow_stats_l0->vm_start = 0;
++	flow_stats_l0->vm_end = flow_stats_l0->vm_start + 8 * 1024 * max_page_size;
++
++	int ret = l0_mmap(NULL, flow_cache_l0);
++
++	if (ret < 0){
++		pr_err("%s: pid: %d, flow apply l0 mem failed \n", current->comm,
++			current->pid);
++		return -ENOMEM;
++	}
++
++	ret = l0_mmap(NULL, flow_stats_l0);
++
++	if (ret < 0){
++		l0_vma_close(flow_cache_l0);
++		kfree(flow_cache_l0);
++		flow_cache_l0 = NULL;
++		pr_err("%s: pid: %d, flow stats apply l0 mem failed \n", current->comm,
++			current->pid);
++		return -ENOMEM;
++	}
+ 	flow_cache = kmem_cache_create("sw_flow", sizeof(struct sw_flow)
+ 				       + (nr_cpu_ids
+ 					  * sizeof(struct sw_flow_stats *)),
+ 				       0, 0, NULL);
++
+ 	if (flow_cache == NULL)
+ 		return -ENOMEM;
+
+@@ -1219,4 +1419,10 @@ void ovs_flow_exit(void)
+ {
+ 	kmem_cache_destroy(flow_stats_cache);
+ 	kmem_cache_destroy(flow_cache);
++	l0_vma_close(flow_cache_l0);
++	l0_vma_close(flow_stats_l0);
++	kfree(flow_cache_l0);
++	kfree(flow_stats_l0);
++	flow_cache_l0 = NULL;
++	flow_stats_l0 = NULL;
+ }
+diff --git a/net/openvswitch/flow_table.h b/net/openvswitch/flow_table.h
+index 9e659db78c05..fe053569eb1b 100644
+--- a/net/openvswitch/flow_table.h
++++ b/net/openvswitch/flow_table.h
+@@ -69,6 +69,7 @@ struct flow_table {
+ 	unsigned int ufid_count;
+ };
+
++extern struct vm_area_struct *flow_stats_l0;
+ extern struct kmem_cache *flow_stats_cache;
+
+ int ovs_flow_init(void);
+--
+2.34.1
+
