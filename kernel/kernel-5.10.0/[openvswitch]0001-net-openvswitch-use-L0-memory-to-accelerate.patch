@@ -1,4 +1,4 @@
-From 4580ec1bf8895dbaabee65b00f5073af94216ea0 Mon Sep 17 00:00:00 2001
+From 9bc4170f8b598499d5c1ac4d992f159ee4c417bd Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?=E8=B0=A2=E6=99=93=E4=B8=9C?= <xiexiaodong16@huawei.com>
 Date: Wed, 11 Jun 2025 10:34:47 +0800
 Subject: [PATCH] [OLK-5.10] net/openvswitch: use L0 memory to accelerate flow
@@ -7,9 +7,9 @@ Subject: [PATCH] [OLK-5.10] net/openvswitch: use L0 memory to accelerate flow
   This patch is used to accelerate the fast flow table matching mechanism in openvswitch by utilizing L0 memory. It improves flow table matching speed through the placement of flow and flow_stat structure in L0 memory.
 ---
  net/openvswitch/flow.c       |  11 +-
- net/openvswitch/flow_table.c | 231 +++++++++++++++++++++++++++++++++--
+ net/openvswitch/flow_table.c | 229 +++++++++++++++++++++++++++++++++--
  net/openvswitch/flow_table.h |   1 +
- 3 files changed, 227 insertions(+), 16 deletions(-)
+ 3 files changed, 225 insertions(+), 16 deletions(-)
 
 diff --git a/net/openvswitch/flow.c b/net/openvswitch/flow.c
 index 9bad601c7fe8..0e2d8984058b 100644
@@ -41,7 +41,7 @@ index 9bad601c7fe8..0e2d8984058b 100644
  					new_stats->used = jiffies;
  					new_stats->packet_count = 1;
 diff --git a/net/openvswitch/flow_table.c b/net/openvswitch/flow_table.c
-index c89c8da99f1a..f5ce25e79bc1 100644
+index c89c8da99f1a..acd6f82e6891 100644
 --- a/net/openvswitch/flow_table.c
 +++ b/net/openvswitch/flow_table.c
 @@ -33,7 +33,178 @@
@@ -277,7 +277,22 @@ index c89c8da99f1a..f5ce25e79bc1 100644
  }
 
  static void rcu_free_flow_callback(struct rcu_head *rcu)
-@@ -1195,10 +1367,40 @@ int ovs_flow_init(void)
+@@ -1188,6 +1360,14 @@ void ovs_flow_masks_rebalance(struct flow_table *table)
+ 	kfree(masks_and_count);
+ }
+
++void l0_flow_exit(void)
++{
++	kfree(flow_cache_l0);
++	kfree(flow_stats_l0);
++	flow_cache_l0 = NULL;
++	flow_stats_l0 = NULL;
++}
++
+ /* Initializes the flow module.
+  * Returns zero if successful or a negative error code. */
+ int ovs_flow_init(void)
+@@ -1195,10 +1375,38 @@ int ovs_flow_init(void)
  	BUILD_BUG_ON(__alignof__(struct sw_flow_key) % __alignof__(long));
  	BUILD_BUG_ON(sizeof(struct sw_flow_key) % sizeof(long));
 
@@ -303,8 +318,6 @@ index c89c8da99f1a..f5ce25e79bc1 100644
 +
 +	if (ret < 0){
 +		l0_vma_close(flow_cache_l0);
-+		kfree(flow_cache_l0);
-+		flow_cache_l0 = NULL;
 +		l0_flow_exit();
 +		pr_err("%s: pid: %d, flow stats apply l0 mem failed \n", current->comm,
 +			current->pid);
@@ -318,7 +331,7 @@ index c89c8da99f1a..f5ce25e79bc1 100644
  	if (flow_cache == NULL)
  		return -ENOMEM;
 
-@@ -1219,4 +1421,15 @@ void ovs_flow_exit(void)
+@@ -1219,4 +1427,7 @@ void ovs_flow_exit(void)
  {
  	kmem_cache_destroy(flow_stats_cache);
  	kmem_cache_destroy(flow_cache);
@@ -326,15 +339,6 @@ index c89c8da99f1a..f5ce25e79bc1 100644
 +	l0_vma_close(flow_stats_l0);
 +	l0_flow_exit();
  }
-+
-+void l0_flow_exit(void)
-+{
-+	kfree(flow_cache_l0);
-+	kfree(flow_stats_l0);
-+	flow_cache_l0 = NULL;
-+	flow_stats_l0 = NULL;
-+}
-\ No newline at end of file
 diff --git a/net/openvswitch/flow_table.h b/net/openvswitch/flow_table.h
 index 9e659db78c05..fe053569eb1b 100644
 --- a/net/openvswitch/flow_table.h
