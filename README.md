@@ -10,14 +10,20 @@
 
 #### 使用说明
 
-1.  L0加速openvswtich内核态流表匹配特性
+1.  虚拟机跨代热迁移特性
     使用步骤如下：
-    1、拉下5.10.216源码仓
+    （1）到openEuler仓库拉取kernel、qemu代码
+    （2）切换到对应分支，使用tools目录中的脚本完成patch应用
+    （3）详细操作步骤见鲲鹏社区
+
+2.  L0加速openvswtich内核态流表匹配特性
+    使用步骤如下：
+    （1）、拉下5.10.216源码仓
     git clone https://gitee.com/openeuler/kernel.git -b 5.10.0-216.0.0 --depth=1
-    2、将补丁保存为.patch文件
-    3、合入补丁
+    （2）、将补丁保存为.patch文件
+    （3）、合入补丁
     git am --reject <补丁名称>
-    4、编译openvswitch模块
+    （4）、编译openvswitch模块
     在../kernel/net/openvswitch
     make CONFIG_XENO_DRIVERS_NET_DRV_IGB=m -C <源码目录> M=pwd modules
 
