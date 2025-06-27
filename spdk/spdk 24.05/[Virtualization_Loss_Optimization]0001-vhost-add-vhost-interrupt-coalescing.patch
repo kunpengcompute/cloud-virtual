@@ -1,174 +1,233 @@
-From 1db757114250af31f3731e38bbcf11fffdae6b56 Mon Sep 17 000000 2001
-From Chengfei Huang huangchengfei3@huawei.com
-Date Wed, 21 May 2025 144722 +0800
-Subject [PATCH] vhost add vhost interrupt coalescing
+From 588950b167ad210cc93f62a2b646576365b3d5dc Mon Sep 17 00:00:00 2001
+From: Jia Qingtong <jiaqingtong@huawei.com>
+Date: Wed, 21 May 2025 15:01:20 +0800
+Subject: [PATCH] vhost: add vhost interrupt coalescing
 
-Based on virtio event idx. use vhost -E option to enable
+Signed-off-by: Jia Qingtong <jiaqingtong@huawei.com>
 ---
- appvhostvhost.c            4 ++++
- includespdkevent.h         2 +-
- includespdkvhost.h         8 +++++++
- libvhostrte_vhost_user.c  45 ++++++++++++++++++++++++++++++++++++++
- libvhostspdk_vhost.map     1 +
- libvhostvhost_internal.h   4 ++++
- 6 files changed, 63 insertions(+), 1 deletion(-)
+ ...vhost-add-vhost-interrupt-coalescing.patch | 174 ++++++++++++++++++
+ spdk.spec                                     |   7 +-
+ 2 files changed, 180 insertions(+), 1 deletion(-)
+ create mode 100644 0013-vhost-add-vhost-interrupt-coalescing.patch
 
-diff --git aappvhostvhost.c bappvhostvhost.c
-index 992ba29..f3c36e9 100644
---- aappvhostvhost.c
-+++ bappvhostvhost.c
-@@ -16,6 +16,7 @@ vhost_usage(void)
- {
- 	printf( -f path                 save pid to file under given pathn);
- 	printf( -S path                 directory where to create vhost sockets (default pwd)n);
-+	printf( -E                        Enable Backend Interrupt Coalescingn);
- }
- 
- static void
-@@ -43,6 +44,9 @@ vhost_parse_arg(int ch, char arg)
- 	case 'S'
- 		spdk_vhost_set_socket_path(arg);
- 		break;
-+	case 'E'
-+		spdk_vhost_set_backend_interrupt_coalescing(true);
-+		break;
- 	default
- 		return -EINVAL;
- 	}
-diff --git aincludespdkevent.h bincludespdkevent.h
-index 6f4e7c8..6c65af1 100644
---- aincludespdkevent.h
-+++ bincludespdkevent.h
-@@ -277,7 +277,7 @@ int spdk_app_parse_core_mask(const char mask, struct spdk_cpuset cpumask);
-  
- const struct spdk_cpuset spdk_app_get_core_mask(void);
- 
--#define SPDK_APP_GETOPT_STRING cdeghimnprsuvABLRW
-+#define SPDK_APP_GETOPT_STRING cdeghimnprsuvABLRWE
- 
- enum spdk_app_parse_args_rvals {
- 	SPDK_APP_PARSE_ARGS_HELP = 0,
-diff --git aincludespdkvhost.h bincludespdkvhost.h
-index 0206857..4f111fa 100644
---- aincludespdkvhost.h
-+++ bincludespdkvhost.h
-@@ -340,6 +340,14 @@ int spdk_vhost_blk_construct(const char name, const char cpumask, const char 
-  
- int spdk_vhost_dev_remove(struct spdk_vhost_dev vdev);
- 
+diff --git a/0013-vhost-add-vhost-interrupt-coalescing.patch b/0013-vhost-add-vhost-interrupt-coalescing.patch
+new file mode 100644
+index 0000000..e7cf72d
+--- /dev/null
++++ b/0013-vhost-add-vhost-interrupt-coalescing.patch
+@@ -0,0 +1,174 @@
++From 1db757114250af31f3731e38bbcf11fffdae6b56 Mon Sep 17 00:00:00 2001
++From: Chengfei Huang <huangchengfei3@huawei.com>
++Date: Wed, 21 May 2025 14:47:22 +0800
++Subject: [PATCH] vhost: add vhost interrupt coalescing
 +
-+  Enable spdk backend interrupt coalescing.
-+  Diff than spdk_vhost_get_coalescing, this use virtio used event idx.
-+  param enable to enable or disable.
++Based on virtio event idx. use vhost -E option to enable
++---
++ app/vhost/vhost.c          |  4 ++++
++ include/spdk/event.h       |  2 +-
++ include/spdk/vhost.h       |  8 +++++++
++ lib/vhost/rte_vhost_user.c | 45 ++++++++++++++++++++++++++++++++++++++
++ lib/vhost/spdk_vhost.map   |  1 +
++ lib/vhost/vhost_internal.h |  4 ++++
++ 6 files changed, 63 insertions(+), 1 deletion(-)
++
++diff --git a/app/vhost/vhost.c b/app/vhost/vhost.c
++index 992ba29..f3c36e9 100644
++--- a/app/vhost/vhost.c
+++++ b/app/vhost/vhost.c
++@@ -16,6 +16,7 @@ vhost_usage(void)
++ {
++ 	printf(" -f <path>                 save pid to file under given path\n");
++ 	printf(" -S <path>                 directory where to create vhost sockets (default: pwd)\n");
+++	printf(" -E                        Enable Backend Interrupt Coalescing\n");
++ }
 + 
++ static void
++@@ -43,6 +44,9 @@ vhost_parse_arg(int ch, char *arg)
++ 	case 'S':
++ 		spdk_vhost_set_socket_path(arg);
++ 		break;
+++	case 'E':
+++		spdk_vhost_set_backend_interrupt_coalescing(true);
+++		break;
++ 	default:
++ 		return -EINVAL;
++ 	}
++diff --git a/include/spdk/event.h b/include/spdk/event.h
++index 6f4e7c8..6c65af1 100644
++--- a/include/spdk/event.h
+++++ b/include/spdk/event.h
++@@ -277,7 +277,7 @@ int spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask);
++  */
++ const struct spdk_cpuset *spdk_app_get_core_mask(void);
 + 
-+void spdk_vhost_set_backend_interrupt_coalescing(bool enable);
-+
- #ifdef __cplusplus
- }
- #endif
-diff --git alibvhostrte_vhost_user.c blibvhostrte_vhost_user.c
-index 17a3e0f..1d6cb3c 100644
---- alibvhostrte_vhost_user.c
-+++ blibvhostrte_vhost_user.c
-@@ -23,6 +23,8 @@ static char g_vhost_user_dev_dirname[PATH_MAX] = ;
- 
- static struct spdk_thread g_vhost_user_init_thread;
- 
-+static bool g_backend_interrupt_coalescing = false;
-+
- 
-   DPDK calls our callbacks synchronously but the work those callbacks
-   perform needs to be async. Luckily, all DPDK callbacks are called on
-@@ -346,6 +348,33 @@ vhost_inflight_queue_get_desc(struct spdk_vhost_session vsession,
- 	return 0;
- }
- 
-+#define spdk_vhost_used_event(vr) 
-+       ((volatile uint16_t)&(vr)-vring.avail-ring[(vr)-vring.size])
-+
-+void spdk_vhost_set_backend_interrupt_coalescing(bool enable) {
-+       SPDK_NOTICELOG(Set SPDK backend interrupt coalescing mode.n);
-+    g_backend_interrupt_coalescing = enable;
-+}
-+
-+bool spdk_vhost_get_backend_interrupt_coalescing(void) {
-+    return g_backend_interrupt_coalescing;
-+}
-+
-+#define spdk_vhost_used_event(vr) 
-+       ((volatile uint16_t)&(vr)-vring.avail-ring[(vr)-vring.size])
-+
-+
-+  The following is used with VIRTIO_RING_F_EVENT_IDX.
-+  Assuming a given event_idx value from the other size, if we have
-+  just incremented index from old to new_idx, should we trigger an
-+  event
++-#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uvA:B:L:RW:"
+++#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uvA:B:L:RW:E"
 + 
-+static inline int
-+spdk_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old)
-+{
-+       return (uint16_t)(new_idx - event_idx - 1)  (uint16_t)(new_idx - old);
-+}
++ enum spdk_app_parse_args_rvals {
++ 	SPDK_APP_PARSE_ARGS_HELP = 0,
++diff --git a/include/spdk/vhost.h b/include/spdk/vhost.h
++index 0206857..4f111fa 100644
++--- a/include/spdk/vhost.h
+++++ b/include/spdk/vhost.h
++@@ -340,6 +340,14 @@ int spdk_vhost_blk_construct(const char *name, const char *cpumask, const char *
++  */
++ int spdk_vhost_dev_remove(struct spdk_vhost_dev *vdev);
++ 
+++/**
+++ * Enable spdk backend interrupt coalescing.
+++ * Diff than spdk_vhost_get_coalescing, this use virtio used event idx.
+++ * \param enable to enable or disable.
+++ *
+++ */
+++void spdk_vhost_set_backend_interrupt_coalescing(bool enable);
+++
++ #ifdef __cplusplus
++ }
++ #endif
++diff --git a/lib/vhost/rte_vhost_user.c b/lib/vhost/rte_vhost_user.c
++index 17a3e0f..1d6cb3c 100644
++--- a/lib/vhost/rte_vhost_user.c
+++++ b/lib/vhost/rte_vhost_user.c
++@@ -23,6 +23,8 @@ static char g_vhost_user_dev_dirname[PATH_MAX] = "";
++ 
++ static struct spdk_thread *g_vhost_user_init_thread;
++ 
+++static bool g_backend_interrupt_coalescing = false;
+++
++ /**
++  * DPDK calls our callbacks synchronously but the work those callbacks
++  * perform needs to be async. Luckily, all DPDK callbacks are called on
++@@ -346,6 +348,33 @@ vhost_inflight_queue_get_desc(struct spdk_vhost_session *vsession,
++ 	return 0;
++ }
++ 
+++#define spdk_vhost_used_event(vr) \
+++       (*(volatile uint16_t*)&(vr)->vring.avail->ring[(vr)->vring.size])
+++
+++void spdk_vhost_set_backend_interrupt_coalescing(bool enable) {
+++       SPDK_NOTICELOG("Set SPDK backend interrupt coalescing mode.\n");
+++    g_backend_interrupt_coalescing = enable;
+++}
+++
+++bool spdk_vhost_get_backend_interrupt_coalescing(void) {
+++    return g_backend_interrupt_coalescing;
+++}
+++
+++#define spdk_vhost_used_event(vr) \
+++       (*(volatile uint16_t*)&(vr)->vring.avail->ring[(vr)->vring.size])
+++
+++/*
+++ * The following is used with VIRTIO_RING_F_EVENT_IDX.
+++ * Assuming a given event_idx value from the other size, if we have
+++ * just incremented index from old to new_idx, should we trigger an
+++ * event?
+++ */
+++static inline int
+++spdk_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old)
+++{
+++       return (uint16_t)(new_idx - event_idx - 1) < (uint16_t)(new_idx - old);
+++}
+++
++ int
++ vhost_vq_used_signal(struct spdk_vhost_session *vsession,
++ 		     struct spdk_vhost_virtqueue *virtqueue)
++@@ -357,6 +386,22 @@ vhost_vq_used_signal(struct spdk_vhost_session *vsession,
++ 	SPDK_DEBUGLOG(vhost_ring,
++ 		      "Queue %td - USED RING: sending IRQ: last used %"PRIu16"\n",
++ 		      virtqueue - vsession->virtqueue, virtqueue->last_used_idx);
+++	if (spdk_vhost_get_backend_interrupt_coalescing() == true) {
+++                bool used_signalled_valid = virtqueue->used_signalled_valid;
+++                uint16_t old = virtqueue->used_signalled;
+++                uint16_t new = virtqueue->last_used_idx;
+++
+++                struct rte_vhost_vring *vring = &virtqueue->vring;
+++                struct vring_avail *avail = vring->avail;
+++                uint16_t guest_used_event = spdk_vhost_used_event(virtqueue);
+++                uint16_t cur_ring_size = (uint16_t)(avail->idx - guest_used_event);
+++                uint16_t target = guest_used_event + cur_ring_size * 3 / 4;
+++                if (cur_ring_size > vring->size / 4) {
+++                        target = guest_used_event + cur_ring_size * 1 / 4;
+++                }
+++ 
+++                static unsigned long long cnt = 0;
+++                if(!spdk_need_event(target, new, old) && used_signalled_valid) {
+++                        return 0;
+++                }
+++
+++                virtqueue->used_signalled = new;
+++                virtqueue->used_signalled_valid = true;
+++       }
+++
++ 
++ #if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
++ 	if (rte_vhost_vring_call(vsession->vid, virtqueue->vring_idx) == 0) {
++diff --git a/lib/vhost/spdk_vhost.map b/lib/vhost/spdk_vhost.map
++index f8b9d55..0a0b2ab 100644
++--- a/lib/vhost/spdk_vhost.map
+++++ b/lib/vhost/spdk_vhost.map
++@@ -2,6 +2,7 @@
++ 	global:
++ 
++ 	# public functions
+++	spdk_vhost_set_backend_interrupt_coalescing;
++ 	spdk_vhost_set_socket_path;
++ 	spdk_vhost_scsi_init;
++ 	spdk_vhost_scsi_fini;
++diff --git a/lib/vhost/vhost_internal.h b/lib/vhost/vhost_internal.h
++index 04e7440..3d47dff 100644
++--- a/lib/vhost/vhost_internal.h
+++++ b/lib/vhost/vhost_internal.h
++@@ -66,6 +66,8 @@ struct spdk_vhost_virtqueue {
++ 	struct rte_vhost_ring_inflight vring_inflight;
++ 	uint16_t last_avail_idx;
++ 	uint16_t last_used_idx;
+++	uint16_t used_signalled;
+++	uint16_t used_signalled_valid;
++ 
++ 	struct {
++ 		/* To mark a descriptor as available in packed ring
++@@ -615,4 +617,6 @@ static void __attribute__((constructor)) _virtio_blk_transport_register_##name(v
++ 	virtio_blk_transport_register(transport_ops); \
++ }
++ 
+++bool spdk_vhost_get_backend_interrupt_coalescing(void);
+++
++ #endif /* SPDK_VHOST_INTERNAL_H */
++-- 
++2.33.0
 +
- int
- vhost_vq_used_signal(struct spdk_vhost_session vsession,
- 		     struct spdk_vhost_virtqueue virtqueue)
-@@ -357,6 +386,22 @@ vhost_vq_used_signal(struct spdk_vhost_session vsession,
- 	SPDK_DEBUGLOG(vhost_ring,
- 		      Queue %td - USED RING sending IRQ last used %PRIu16n,
- 		      virtqueue - vsession-virtqueue, virtqueue-last_used_idx);
-+	if (spdk_vhost_get_backend_interrupt_coalescing() == true) {
-+                bool used_signalled_valid = virtqueue-used_signalled_valid;
-+                uint16_t old = virtqueue-used_signalled;
-+                uint16_t new = virtqueue-last_used_idx;
+diff --git a/spdk.spec b/spdk.spec
+index 83923c0..55940a5 100644
+--- a/spdk.spec
++++ b/spdk.spec
+@@ -4,7 +4,7 @@
+ 
+ Name: spdk
+ Version: 24.01
+-Release: 8
++Release: 9
+ Summary: Set of libraries and utilities for high performance user-mode storage
+ License: BSD and MIT
+ URL: http://spdk.io
+@@ -21,6 +21,8 @@ Patch9: 0009-spdk-add-nvme-support-for-HSAK.patch
+ Patch10: 0010-Add-CUSE-switch-for-nvme-ctrlr.patch
+ Patch11: 0011-Adapt-for-ES3000-serial-vendor-special-opcode-in-CUS.patch
+ Patch12: 0012-adapt-for-spdk-24.01.patch
++Patch13: 0013-vhost-add-vhost-interrupt-coalescing.patch
 +
-+                struct rte_vhost_vring vring = &virtqueue-vring;
-+                struct vring_avail avail = vring-avail;
-+                uint16_t guest_used_event = spdk_vhost_used_event(virtqueue);
-+                uint16_t target = guest_used_event + (uint16_t)(avail-idx - guest_used_event)  1  4;
-+                virtqueue-used_signalled_valid = true;
-+                virtqueue-used_signalled = virtqueue-last_used_idx;
+ 
+ %define package_version %{version}-%{release}
+ 
+@@ -199,6 +201,9 @@ mv doc/output/html/ %{install_docdir}
+ 
+ 
+ %changelog
++* Sat May 10 2025 jiaqingtong <jiaqingtong@huawei.com> - 24.01-9
++- vhost: add vhost interrupt coalescing model 
 +
-+                if(!spdk_need_event(target, new, old) && used_signalled_valid) {
-+                        return 0;
-+                }
-+       }
+ * Thu Mar 27 2025 wangzhiqiang <wangzhiqiang95@huawei.com> - 24.01-8
+ - Add BuildRequires python3-setuptools and python3-wheel
  
- #if RTE_VERSION  RTE_VERSION_NUM(22, 11, 0, 0)
- 	if (rte_vhost_vring_call(vsession-vid, virtqueue-vring_idx) == 0) {
-diff --git alibvhostspdk_vhost.map blibvhostspdk_vhost.map
-index f8b9d55..0a0b2ab 100644
---- alibvhostspdk_vhost.map
-+++ blibvhostspdk_vhost.map
-@@ -2,6 +2,7 @@
- 	global
- 
- 	# public functions
-+	spdk_vhost_set_backend_interrupt_coalescing;
- 	spdk_vhost_set_socket_path;
- 	spdk_vhost_scsi_init;
- 	spdk_vhost_scsi_fini;
-diff --git alibvhostvhost_internal.h blibvhostvhost_internal.h
-index 04e7440..3d47dff 100644
---- alibvhostvhost_internal.h
-+++ blibvhostvhost_internal.h
-@@ -66,6 +66,8 @@ struct spdk_vhost_virtqueue {
- 	struct rte_vhost_ring_inflight vring_inflight;
- 	uint16_t last_avail_idx;
- 	uint16_t last_used_idx;
-+	uint16_t used_signalled;
-+	uint16_t used_signalled_valid;
- 
- 	struct {
- 		 To mark a descriptor as available in packed ring
-@@ -615,4 +617,6 @@ static void __attribute__((constructor)) _virtio_blk_transport_register_##name(v
- 	virtio_blk_transport_register(transport_ops); 
- }
- 
-+bool spdk_vhost_get_backend_interrupt_coalescing(void);
-+
- #endif  SPDK_VHOST_INTERNAL_H 
 -- 
-2.33.0
-
+Gitee
