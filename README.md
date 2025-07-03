@@ -25,7 +25,7 @@
     使用步骤如下：
     （1）到openEuler仓库拉取kernel、qemu代码
     （2）切换到对应分支，使用tools目录中的脚本完成patch应用
-    （3）详细操作步骤见鲲鹏社区
+    （3）详细操作步骤见鲲鹏社区 https://support.huawei.com/enterprise/zh/doc/EDOC1100484197/35a9145e
 
 2.  L0加速openvswtich内核态流表匹配特性
     使用步骤如下：
