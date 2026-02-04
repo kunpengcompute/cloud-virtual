@@ -1,0 +1,71 @@
+From 7b8434181601584f9bb6640b86119595fd38506f Mon Sep 17 00:00:00 2001
+From: Kunkun Jiang <jiangkunkun@huawei.com>
+Date: Wed, 21 Jan 2026 15:10:48 +0800
+Subject: [PATCH] KVM: arm64: Optimize VMOVP
+
+Signed-off-by: Kunkun Jiang <jiangkunkun@huawei.com>
+---
+ arch/arm64/kvm/vgic/vgic-v4.c      | 11 ++++++++---
+ drivers/irqchip/irq-gic-v3-its.c   | 11 +++++++++++
+ include/linux/irqchip/arm-gic-v3.h |  1 +
+ 3 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/kvm/vgic/vgic-v4.c b/arch/arm64/kvm/vgic/vgic-v4.c
+index 06fec5cea3d7..ff988da3bca1 100644
+--- a/arch/arm64/kvm/vgic/vgic-v4.c
++++ b/arch/arm64/kvm/vgic/vgic-v4.c
+@@ -423,9 +423,14 @@ int vgic_v4_load(struct kvm_vcpu *vcpu)
+ 	 * doc in drivers/irqchip/irq-gic-v4.c to understand how this
+ 	 * turns into a VMOVP command at the ITS level.
+ 	 */
+-	err = irq_set_affinity(vpe->irq, cpumask_of(smp_processor_id()));
+-	if (err)
+-		return err;
++	if (same_affinity_group(vpe->col_idx, smp_processor_id())) {
++		/* Skip send VMOVP */
++		vpe->col_idx = smp_processor_id();
++	} else {
++		err = irq_set_affinity(vpe->irq, cpumask_of(smp_processor_id()));
++		if (err)
++			return err;
++	}
+ 
+ 	err = its_make_vpe_resident(vpe, false, vcpu->kvm->arch.vgic.enabled);
+ 	if (err)
+diff --git a/drivers/irqchip/irq-gic-v3-its.c b/drivers/irqchip/irq-gic-v3-its.c
+index b6d07bf8c0ad..1a07987055a8 100644
+--- a/drivers/irqchip/irq-gic-v3-its.c
++++ b/drivers/irqchip/irq-gic-v3-its.c
+@@ -4270,6 +4270,17 @@ static void its_vpe_db_proxy_move(struct its_vpe *vpe, int from, int to)
+ 	raw_spin_unlock_irqrestore(&vpe_proxy.lock, flags);
+ }
+ 
++bool same_affinity_group(int col_idx, int cpu)
++{
++	struct cpumask *table_mask;
++
++	table_mask = gic_data_rdist_cpu(cpu)->vpe_table_mask;
++	if (table_mask)
++		return cpumask_test_cpu(col_idx, table_mask);
++
++	return false;
++}
++
+ static int its_vpe_set_affinity(struct irq_data *d,
+ 				const struct cpumask *mask_val,
+ 				bool force)
+diff --git a/include/linux/irqchip/arm-gic-v3.h b/include/linux/irqchip/arm-gic-v3.h
+index 903d79b3b55d..5949c67268b8 100644
+--- a/include/linux/irqchip/arm-gic-v3.h
++++ b/include/linux/irqchip/arm-gic-v3.h
+@@ -708,6 +708,7 @@ int its_cpu_init(void);
+ int its_init(struct fwnode_handle *handle, struct rdists *rdists,
+ 	     struct irq_domain *domain);
+ int mbi_init(struct fwnode_handle *fwnode, struct irq_domain *parent);
++bool same_affinity_group(int col_idx, int cpu);
+ 
+ #ifdef CONFIG_VIRT_VTIMER_IRQ_BYPASS
+ phys_addr_t get_gicr_paddr(int cpu);
+-- 
+2.33.0
+
