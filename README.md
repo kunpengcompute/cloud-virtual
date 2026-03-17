@@ -154,4 +154,4 @@ ovs-appctl dpif-netdev/pmd-rxq-show -secs 5
 # 许可证书<a name="ZH-CN_TOPIC_0000002474636973"></a>
 
 本项目采用Apache License 2.0许可证。详见[LICENSE](https://gitcode.com/boostkit/cloud-virtual/blob/master/LICENSE)文件。
-
+本项目的文档适用CC-BY 4.0许可证，具体请参见[LICENSE](https://gitcode.com/boostkit/cloud-virtual/blob/master/docs/LICENSE)文件。
