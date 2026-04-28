@@ -1,0 +1,820 @@
+From ab071783d45d7b704eab54a43b135d53785392a1 Mon Sep 17 00:00:00 2001
+From: Xie Xiaodong <xiexiaodong16@huawei.com>
+Date: Fri, 10 Apr 2026 09:58:54 +0800
+Subject: [PATCH] PCI/ACPI: Support ITS selection for PCI VF devices
+
+hulk inclusion
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/8916
+
+----------------------------------------
+
+Allow a PF to configure the ITS raw indices that should be used by its
+VFs through sriov_vf_its_indices. Each VF resolves its target ITS from
+that PF-provided list and uses the selected ITS MSI domain when
+ACPI/IORT looks up the PCI MSI domain.
+
+Add the PCI and IORT helpers needed to support this flow: store and
+parse the PF-provided indices, resolve a VF-specific ITS index,
+validate the configured indices against the PF ITS, and reject
+configurations that are unsupported by the platform topology or ITS
+implementation. This also exposes the ITS IIDR needed for the platform
+support check and updates the platform ITS base-address map used during
+validation.
+
+Keep the validation and selection logs needed to diagnose
+configuration issues, but the main change is enabling controlled ITS
+selection for PCI VF devices.
+
+Signed-off-by: Xie Xiaodong <xiexiaodong16@huawei.com>
+---
+ drivers/acpi/arm64/iort.c              | 325 +++++++++++++++++++++++++
+ drivers/irqchip/irq-gic-v3-its.c       |  22 ++
+ drivers/pci/iov.c                      | 210 ++++++++++++++++
+ drivers/pci/pci.h                      |   9 +
+ drivers/pci/probe.c                    |   6 +-
+ include/linux/acpi_iort.h              |  12 +
+ include/linux/irqchip/arm-gic-v3-its.h |  18 ++
+ include/linux/pci.h                    |   7 +
+ 8 files changed, 608 insertions(+), 1 deletion(-)
+ create mode 100644 include/linux/irqchip/arm-gic-v3-its.h
+
+diff --git a/drivers/acpi/arm64/iort.c b/drivers/acpi/arm64/iort.c
+index ebb52d2b22de..39133abab209 100644
+--- a/drivers/acpi/arm64/iort.c
++++ b/drivers/acpi/arm64/iort.c
+@@ -13,8 +13,10 @@
+ #include <linux/acpi_iort.h>
+ #include <linux/bitfield.h>
+ #include <linux/iommu.h>
++#include <linux/irqchip/arm-gic-v3-its.h>
+ #include <linux/kernel.h>
+ #include <linux/list.h>
++#include <linux/msi.h>
+ #include <linux/pci.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+@@ -151,6 +153,316 @@ static struct acpi_table_header *iort_table;
+ static LIST_HEAD(iort_msi_chip_list);
+ static DEFINE_SPINLOCK(iort_msi_chip_lock);
+ 
++#define IORT_VF_ITS_SUPPORTED_IIDR	0x00070736U
++
++enum iort_platform_its_slot {
++	IORT_PLATFORM_ITS_A,
++	IORT_PLATFORM_ITS_B,
++	IORT_PLATFORM_ITS_C,
++	IORT_PLATFORM_ITS_D,
++};
++
++struct iort_vf_its_candidate {
++	struct fwnode_handle *fw_node;
++	phys_addr_t base_addr;
++	u32 translation_id;
++};
++
++struct iort_platform_its_desc {
++	phys_addr_t base_addr;
++	u8 socket_id;
++	enum iort_platform_its_slot slot;
++};
++
++static const struct iort_platform_its_desc iort_platform_its_map[] = {
++	{ 0x3010000000ULL, 0, IORT_PLATFORM_ITS_A },
++	{ 0x2888000000ULL, 0, IORT_PLATFORM_ITS_B },
++	{ 0x0588000000ULL, 0, IORT_PLATFORM_ITS_C },
++	{ 0x0488000000ULL, 0, IORT_PLATFORM_ITS_D },
++	{ 0x7010000000ULL, 1, IORT_PLATFORM_ITS_A },
++	{ 0x6888000000ULL, 1, IORT_PLATFORM_ITS_B },
++	{ 0x4588000000ULL, 1, IORT_PLATFORM_ITS_C },
++	{ 0x4488000000ULL, 1, IORT_PLATFORM_ITS_D },
++};
++
++static const struct iort_platform_its_desc *
++iort_lookup_platform_its(phys_addr_t base_addr)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(iort_platform_its_map); i++) {
++		if (iort_platform_its_map[i].base_addr == base_addr)
++			return &iort_platform_its_map[i];
++	}
++
++	return NULL;
++}
++
++static const char *iort_platform_its_slot_name(enum iort_platform_its_slot slot)
++{
++	switch (slot) {
++	case IORT_PLATFORM_ITS_A:
++		return "A";
++	case IORT_PLATFORM_ITS_B:
++		return "B";
++	case IORT_PLATFORM_ITS_C:
++		return "C";
++	case IORT_PLATFORM_ITS_D:
++		return "D";
++	}
++
++	return "?";
++}
++
++static bool iort_vf_its_is_allowed(phys_addr_t pf_base_addr,
++				   phys_addr_t candidate_base_addr)
++{
++	const struct iort_platform_its_desc *pf_desc;
++	const struct iort_platform_its_desc *candidate_desc;
++
++	if (pf_base_addr == candidate_base_addr)
++		return true;
++
++	pf_desc = iort_lookup_platform_its(pf_base_addr);
++	candidate_desc = iort_lookup_platform_its(candidate_base_addr);
++	if (!pf_desc || !candidate_desc)
++		return false;
++
++	if (pf_desc->socket_id != candidate_desc->socket_id)
++		return false;
++
++	switch (pf_desc->slot) {
++	case IORT_PLATFORM_ITS_A:
++		return candidate_desc->slot == IORT_PLATFORM_ITS_A;
++	case IORT_PLATFORM_ITS_B:
++	case IORT_PLATFORM_ITS_C:
++	case IORT_PLATFORM_ITS_D:
++		return candidate_desc->slot == IORT_PLATFORM_ITS_B ||
++		       candidate_desc->slot == IORT_PLATFORM_ITS_C ||
++		       candidate_desc->slot == IORT_PLATFORM_ITS_D;
++	}
++
++	return false;
++}
++
++static int iort_get_msi_chip_by_raw_index(unsigned int raw_index,
++					  struct iort_vf_its_candidate *candidate)
++{
++	struct iort_its_msi_chip *its_msi_chip;
++	unsigned int index = 0;
++	int ret = -ERANGE;
++
++	if (!candidate)
++		return -EINVAL;
++
++	spin_lock(&iort_msi_chip_lock);
++	list_for_each_entry(its_msi_chip, &iort_msi_chip_list, list) {
++		if (index++ != raw_index)
++			continue;
++
++		candidate->fw_node = its_msi_chip->fw_node;
++		candidate->base_addr = its_msi_chip->base_addr;
++		candidate->translation_id = its_msi_chip->translation_id;
++		ret = 0;
++		break;
++	}
++	spin_unlock(&iort_msi_chip_lock);
++
++	return ret;
++}
++
++static int iort_get_pci_msi_domain_by_raw_index(unsigned int raw_index,
++						struct irq_domain **domain,
++						struct iort_vf_its_candidate *candidate)
++{
++	int ret;
++
++	if (!domain || !candidate)
++		return -EINVAL;
++
++	ret = iort_get_msi_chip_by_raw_index(raw_index, candidate);
++	if (ret)
++		return ret;
++
++	*domain = irq_find_matching_fwnode(candidate->fw_node, DOMAIN_BUS_PCI_MSI);
++	return *domain ? 0 : -ENODEV;
++}
++
++static int iort_get_pci_msi_domain_by_fwnode(struct fwnode_handle *fw_node,
++					     struct irq_domain **domain,
++					     struct iort_vf_its_candidate *candidate,
++					     unsigned int *raw_index)
++{
++	struct iort_its_msi_chip *its_msi_chip;
++	unsigned int index = 0;
++	int ret = -ENODEV;
++
++	if (!fw_node || !domain || !candidate)
++		return -EINVAL;
++
++	spin_lock(&iort_msi_chip_lock);
++	list_for_each_entry(its_msi_chip, &iort_msi_chip_list, list) {
++		if (its_msi_chip->fw_node != fw_node) {
++			index++;
++			continue;
++		}
++
++		candidate->fw_node = its_msi_chip->fw_node;
++		candidate->base_addr = its_msi_chip->base_addr;
++		candidate->translation_id = its_msi_chip->translation_id;
++		if (raw_index)
++			*raw_index = index;
++		ret = 0;
++		break;
++	}
++	spin_unlock(&iort_msi_chip_lock);
++
++	if (ret)
++		return ret;
++
++	*domain = irq_find_matching_fwnode(fw_node, DOMAIN_BUS_PCI_MSI);
++	return *domain ? 0 : -ENODEV;
++}
++
++static int iort_get_pf_msi_chip(struct pci_dev *pdev,
++				struct irq_domain **domain,
++				struct iort_vf_its_candidate *candidate,
++				unsigned int *raw_index)
++{
++	struct irq_domain *pf_domain;
++
++	if (!pdev || !domain || !candidate)
++		return -EINVAL;
++
++	pf_domain = dev_get_msi_domain(&pdev->dev);
++	if (!pf_domain)
++		return -ENODEV;
++
++	return iort_get_pci_msi_domain_by_fwnode(pf_domain->fwnode, domain,
++						 candidate, raw_index);
++}
++
++static int iort_pci_vf_its_check_chip_support(
++	struct pci_dev *pdev, const struct iort_vf_its_candidate *pf_candidate)
++{
++	u32 iidr;
++
++	if (!pdev || !pf_candidate)
++		return -EINVAL;
++
++	if (!gic_its_get_iidr(pf_candidate->fw_node, &iidr)) {
++		pci_warn(pdev,
++			 "VF ITS selection is unavailable for PF ITS base %pa: unable to identify ITS chip\n",
++			 &pf_candidate->base_addr);
++		return -EOPNOTSUPP;
++	}
++
++	if (iidr == IORT_VF_ITS_SUPPORTED_IIDR)
++		return 0;
++
++	pci_warn(pdev,
++		 "VF ITS selection is not supported on ITS IIDR 0x%08x (PF ITS base %pa)\n",
++		 iidr, &pf_candidate->base_addr);
++	return -EOPNOTSUPP;
++}
++
++int iort_pci_vf_its_validate_indices(struct pci_dev *pdev,
++				     const unsigned int *indices,
++				     unsigned int nr_indices)
++{
++	struct irq_domain *domain;
++	struct iort_vf_its_candidate pf_candidate;
++	struct iort_vf_its_candidate candidate;
++	const struct iort_platform_its_desc *pf_desc;
++	const struct iort_platform_its_desc *candidate_desc;
++	unsigned int pf_raw_index;
++	int ret;
++	int i;
++
++	if (!pdev || !indices || !nr_indices)
++		return -EINVAL;
++
++	if (!pdev->is_physfn || !pdev->sriov)
++		return -EOPNOTSUPP;
++
++	ret = iort_get_pf_msi_chip(pdev, &domain, &pf_candidate, &pf_raw_index);
++	if (ret) {
++		pci_err(pdev, "failed to resolve PF ITS domain: %d\n", ret);
++		return ret;
++	}
++
++	ret = iort_pci_vf_its_check_chip_support(pdev, &pf_candidate);
++	if (ret)
++		return ret;
++
++	pf_desc = iort_lookup_platform_its(pf_candidate.base_addr);
++
++	for (i = 0; i < nr_indices; i++) {
++		memset(&candidate, 0, sizeof(candidate));
++		ret = iort_get_pci_msi_domain_by_raw_index(indices[i], &domain,
++							   &candidate);
++		if (ret) {
++			if (candidate.fw_node)
++				pci_err(pdev,
++					"requested VF ITS raw index %u base %pa cannot be used: %d\n",
++					indices[i], &candidate.base_addr, ret);
++			else
++				pci_err(pdev,
++					"requested VF ITS raw index %u is invalid (base address unavailable): %d\n",
++					indices[i], ret);
++			return ret;
++		}
++
++		candidate_desc = iort_lookup_platform_its(candidate.base_addr);
++		if (iort_vf_its_is_allowed(pf_candidate.base_addr,
++					   candidate.base_addr)) {
++			continue;
++		}
++
++		if (pf_desc && candidate_desc)
++			pci_err(pdev,
++				"VF ITS raw index %u base %pa (socket %u slot %s) is not allowed for PF ITS base %pa (raw index %u, socket %u slot %s)\n",
++				indices[i], &candidate.base_addr,
++				candidate_desc->socket_id,
++				iort_platform_its_slot_name(candidate_desc->slot),
++				&pf_candidate.base_addr, pf_raw_index,
++				pf_desc->socket_id,
++				iort_platform_its_slot_name(pf_desc->slot));
++		else
++			pci_err(pdev,
++				"VF ITS raw index %u base %pa is not allowed for PF ITS base %pa (raw index %u)\n",
++				indices[i], &candidate.base_addr, &pf_candidate.base_addr,
++				pf_raw_index);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static struct irq_domain *iort_get_pci_vf_domain(struct pci_dev *pdev)
++{
++	struct irq_domain *domain;
++	struct iort_vf_its_candidate candidate;
++	unsigned int raw_index;
++	int ret;
++
++	ret = pci_iov_vf_get_its_index(pdev, &raw_index);
++	if (ret)
++		return ERR_PTR(ret);
++
++	ret = iort_get_pci_msi_domain_by_raw_index(raw_index, &domain, &candidate);
++	if (ret) {
++		pci_err(pdev, "failed to resolve VF ITS raw index %u: %d\n",
++			raw_index, ret);
++		return ERR_PTR(ret);
++	}
++
++	pci_info(pdev, "VF uses ITS raw index %u base %pa\n",
++		 raw_index, &candidate.base_addr);
++
++	return domain;
++}
++
+ /**
+  * iort_register_domain_token() - register domain token along with related
+  * ITS ID and base address to the list from where we can get it back later on.
+@@ -774,9 +1086,22 @@ static int iort_dev_find_its_id(struct device *dev, u32 id,
+ struct irq_domain *iort_get_device_domain(struct device *dev, u32 id,
+ 					  enum irq_domain_bus_token bus_token)
+ {
++	struct irq_domain *domain;
+ 	struct fwnode_handle *handle;
+ 	int its_id;
+ 
++	if (dev_is_pci(dev) && bus_token == DOMAIN_BUS_PCI_MSI) {
++		struct pci_dev *pdev = to_pci_dev(dev);
++
++		if (pdev->is_virtfn) {
++			domain = iort_get_pci_vf_domain(pdev);
++			if (!IS_ERR(domain))
++				return domain;
++			if (PTR_ERR(domain) != -ENOENT)
++				return NULL;
++		}
++	}
++
+ 	if (iort_dev_find_its_id(dev, id, 0, &its_id))
+ 		return NULL;
+ 
+diff --git a/drivers/irqchip/irq-gic-v3-its.c b/drivers/irqchip/irq-gic-v3-its.c
+index b6d07bf8c0ad..ef3b35b2b90f 100644
+--- a/drivers/irqchip/irq-gic-v3-its.c
++++ b/drivers/irqchip/irq-gic-v3-its.c
+@@ -3698,6 +3698,28 @@ static void its_cpu_init_collections(void)
+ 	raw_spin_unlock(&its_lock);
+ }
+ 
++bool gic_its_get_iidr(struct fwnode_handle *fwnode, u32 *iidr)
++{
++	struct its_node *its;
++	bool found = false;
++
++	if (!fwnode || !iidr)
++		return false;
++
++	raw_spin_lock(&its_lock);
++	list_for_each_entry(its, &its_nodes, entry) {
++		if (its->fwnode_handle != fwnode)
++			continue;
++
++		*iidr = readl_relaxed(its->base + GITS_IIDR);
++		found = true;
++		break;
++	}
++	raw_spin_unlock(&its_lock);
++
++	return found;
++}
++
+ static struct its_device *its_find_device(struct its_node *its, u32 dev_id)
+ {
+ 	struct its_device *its_dev = NULL, *tmp;
+diff --git a/drivers/pci/iov.c b/drivers/pci/iov.c
+index 54ec841e3e18..825e43783495 100644
+--- a/drivers/pci/iov.c
++++ b/drivers/pci/iov.c
+@@ -8,15 +8,58 @@
+  */
+ 
+ #include <linux/pci.h>
++#include <linux/acpi_iort.h>
+ #include <linux/slab.h>
+ #include <linux/export.h>
+ #include <linux/string.h>
+ #include <linux/delay.h>
++#include <linux/xarray.h>
+ #include <linux/virtcca_cvm_domain.h>
+ #include "pci.h"
+ 
+ #define VIRTFN_ID_LEN	17	/* "virtfn%u\0" for 2^32 - 1 */
+ 
++struct pci_iov_vf_its_cfg {
++	unsigned int nr_indices;
++	unsigned int indices[];
++};
++
++static DEFINE_XARRAY(pci_iov_vf_its_configs);
++
++static struct pci_iov_vf_its_cfg *pci_iov_get_vf_its_cfg(struct pci_dev *dev)
++{
++	struct pci_iov_vf_its_cfg *cfg;
++
++	xa_lock(&pci_iov_vf_its_configs);
++	cfg = xa_load(&pci_iov_vf_its_configs, (unsigned long)dev);
++	xa_unlock(&pci_iov_vf_its_configs);
++
++	return cfg;
++}
++
++static int pci_iov_set_vf_its_cfg(struct pci_dev *dev,
++				  struct pci_iov_vf_its_cfg *new_cfg)
++{
++	void *old_cfg;
++
++	if (new_cfg)
++		old_cfg = xa_store(&pci_iov_vf_its_configs, (unsigned long)dev,
++				   new_cfg, GFP_KERNEL);
++	else
++		old_cfg = xa_erase(&pci_iov_vf_its_configs, (unsigned long)dev);
++
++	if (xa_is_err(old_cfg))
++		return xa_err(old_cfg);
++
++	kfree(old_cfg);
++	return 0;
++}
++
++static void pci_iov_free_vf_its_indices(struct pci_dev *dev)
++{
++	pci_iov_set_vf_its_cfg(dev, NULL);
++}
++
+ int pci_iov_virtfn_bus(struct pci_dev *dev, int vf_id)
+ {
+ 	if (!dev->is_physfn)
+@@ -47,6 +90,56 @@ int pci_iov_vf_id(struct pci_dev *dev)
+ }
+ EXPORT_SYMBOL_GPL(pci_iov_vf_id);
+ 
++int pci_iov_vf_get_its_index(struct pci_dev *dev, unsigned int *its_index)
++{
++	struct pci_iov_vf_its_cfg *cfg;
++	struct pci_dev *pf;
++	int vf_id;
++
++	if (!dev->is_virtfn || !its_index)
++		return -EINVAL;
++
++	pf = pci_physfn(dev);
++	if (!pf || !pf->sriov)
++		return -ENOENT;
++
++	vf_id = pci_iov_vf_id(dev);
++	if (vf_id < 0)
++		return vf_id;
++
++	xa_lock(&pci_iov_vf_its_configs);
++	cfg = xa_load(&pci_iov_vf_its_configs, (unsigned long)pf);
++	if (!cfg) {
++		xa_unlock(&pci_iov_vf_its_configs);
++		return -ENOENT;
++	}
++
++	*its_index = cfg->indices[vf_id % cfg->nr_indices];
++	xa_unlock(&pci_iov_vf_its_configs);
++	return 0;
++}
++
++bool pci_iov_vf_has_its_config(struct pci_dev *dev)
++{
++	struct pci_iov_vf_its_cfg *cfg;
++	struct pci_dev *pf;
++	bool has_cfg = false;
++
++	if (!dev->is_virtfn)
++		return false;
++
++	pf = pci_physfn(dev);
++	if (!pf || !pf->sriov)
++		return false;
++
++	xa_lock(&pci_iov_vf_its_configs);
++	cfg = xa_load(&pci_iov_vf_its_configs, (unsigned long)pf);
++	has_cfg = cfg && cfg->nr_indices;
++	xa_unlock(&pci_iov_vf_its_configs);
++
++	return has_cfg;
++}
++
+ /**
+  * pci_iov_get_pf_drvdata - Return the drvdata of a PF
+  * @dev: VF pci_dev
+@@ -542,6 +635,121 @@ static DEVICE_ATTR_RO(sriov_offset);
+ static DEVICE_ATTR_RO(sriov_stride);
+ static DEVICE_ATTR_RO(sriov_vf_device);
+ static DEVICE_ATTR_RW(sriov_drivers_autoprobe);
++static ssize_t sriov_vf_its_indices_show(struct device *dev,
++					 struct device_attribute *attr,
++					 char *buf)
++{
++	struct pci_iov_vf_its_cfg *cfg;
++	struct pci_dev *pdev = to_pci_dev(dev);
++	ssize_t len = 0;
++	int i;
++
++	if (!pdev->is_physfn || !pdev->sriov)
++		return sysfs_emit(buf, "\n");
++
++	device_lock(&pdev->dev);
++
++	cfg = pci_iov_get_vf_its_cfg(pdev);
++	if (!cfg) {
++		len = sysfs_emit(buf, "\n");
++		goto out_unlock;
++	}
++
++	for (i = 0; i < cfg->nr_indices; i++)
++		len += sysfs_emit_at(buf, len, "%s%u", i ? "," : "",
++				     cfg->indices[i]);
++
++	len += sysfs_emit_at(buf, len, "\n");
++out_unlock:
++	device_unlock(&pdev->dev);
++	return len;
++}
++
++static ssize_t sriov_vf_its_indices_store(struct device *dev,
++					  struct device_attribute *attr,
++					  const char *buf, size_t count)
++{
++	struct pci_iov_vf_its_cfg *new_cfg = NULL;
++	struct pci_dev *pdev = to_pci_dev(dev);
++	char *input, *cursor, *token;
++	unsigned int nr = 0;
++	int i, ret = 0;
++
++	if (!pdev->is_physfn || !pdev->sriov)
++		return -EOPNOTSUPP;
++
++	device_lock(&pdev->dev);
++
++	if (pdev->sriov->num_VFs) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	input = kstrdup(buf, GFP_KERNEL);
++	if (!input) {
++		ret = -ENOMEM;
++		goto out_unlock;
++	}
++
++	cursor = strim(input);
++	if (!*cursor || !strcmp(cursor, "-1")) {
++		ret = pci_iov_set_vf_its_cfg(pdev, NULL);
++		if (!ret)
++			ret = count;
++		kfree(input);
++		goto out_unlock;
++	}
++
++	nr = 1;
++	for (i = 0; cursor[i]; i++)
++		if (cursor[i] == ',')
++			nr++;
++
++	if (nr > U16_MAX) {
++		ret = -E2BIG;
++		goto out_free_input;
++	}
++
++	new_cfg = kzalloc(struct_size(new_cfg, indices, nr), GFP_KERNEL);
++	if (!new_cfg) {
++		ret = -ENOMEM;
++		goto out_free_input;
++	}
++	new_cfg->nr_indices = nr;
++
++	for (i = 0; i < nr; i++) {
++		token = strsep(&cursor, ",");
++		if (!token || !*token) {
++			ret = -EINVAL;
++			goto out_free;
++		}
++
++		ret = kstrtouint(token, 0, &new_cfg->indices[i]);
++		if (ret)
++			goto out_free;
++	}
++
++	ret = iort_pci_vf_its_validate_indices(pdev, new_cfg->indices, nr);
++	if (ret)
++		goto out_free;
++
++	ret = pci_iov_set_vf_its_cfg(pdev, new_cfg);
++	if (ret)
++		goto out_free;
++
++	kfree(input);
++	ret = count;
++	goto out_unlock;
++
++out_free:
++	kfree(new_cfg);
++out_free_input:
++	kfree(input);
++out_unlock:
++	device_unlock(&pdev->dev);
++	return ret;
++}
++static DEVICE_ATTR_RW(sriov_vf_its_indices);
+ 
+ static struct attribute *sriov_pf_dev_attrs[] = {
+ 	&dev_attr_sriov_totalvfs.attr,
+@@ -550,6 +758,7 @@ static struct attribute *sriov_pf_dev_attrs[] = {
+ 	&dev_attr_sriov_stride.attr,
+ 	&dev_attr_sriov_vf_device.attr,
+ 	&dev_attr_sriov_drivers_autoprobe.attr,
++	&dev_attr_sriov_vf_its_indices.attr,
+ #ifdef CONFIG_PCI_MSI
+ 	&dev_attr_sriov_vf_total_msix.attr,
+ #endif
+@@ -864,6 +1073,7 @@ static void sriov_release(struct pci_dev *dev)
+ 	if (dev != dev->sriov->dev)
+ 		pci_dev_put(dev->sriov->dev);
+ 
++	pci_iov_free_vf_its_indices(dev);
+ 	kfree(dev->sriov);
+ 	dev->sriov = NULL;
+ }
+diff --git a/drivers/pci/pci.h b/drivers/pci/pci.h
+index c8764000553b..5ef5f35f13d7 100644
+--- a/drivers/pci/pci.h
++++ b/drivers/pci/pci.h
+@@ -325,6 +325,15 @@ struct pci_sriov {
+ 	KABI_RESERVE(8)
+ };
+ 
++#ifdef CONFIG_PCI_IOV
++bool pci_iov_vf_has_its_config(struct pci_dev *dev);
++#else
++static inline bool pci_iov_vf_has_its_config(struct pci_dev *dev)
++{
++	return false;
++}
++#endif
++
+ #ifdef CONFIG_PCI_DOE
+ void pci_doe_init(struct pci_dev *pdev);
+ void pci_doe_destroy(struct pci_dev *pdev);
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index 6a6643dfa5fc..8d41fe4ad745 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -2553,6 +2553,10 @@ static struct irq_domain *pci_dev_msi_domain(struct pci_dev *dev)
+ static void pci_set_msi_domain(struct pci_dev *dev)
+ {
+ 	struct irq_domain *d;
++	bool vf_has_its_cfg = false;
++
++	if (dev->is_virtfn)
++		vf_has_its_cfg = pci_iov_vf_has_its_config(dev);
+ 
+ 	/*
+ 	 * If the platform or firmware interfaces cannot supply a
+@@ -2560,7 +2564,7 @@ static void pci_set_msi_domain(struct pci_dev *dev)
+ 	 * from the host bridge itself.
+ 	 */
+ 	d = pci_dev_msi_domain(dev);
+-	if (!d)
++	if (!d && !vf_has_its_cfg)
+ 		d = dev_get_msi_domain(&dev->bus->dev);
+ 
+ 	dev_set_msi_domain(&dev->dev, d);
+diff --git a/include/linux/acpi_iort.h b/include/linux/acpi_iort.h
+index a5e397fe05a8..d204db5dc553 100644
+--- a/include/linux/acpi_iort.h
++++ b/include/linux/acpi_iort.h
+@@ -11,6 +11,8 @@
+ #include <linux/fwnode.h>
+ #include <linux/irqdomain.h>
+ 
++struct pci_dev;
++
+ #define IORT_IRQ_MASK(irq)		(irq & 0xffffffffULL)
+ #define IORT_IRQ_TRIGGER_MASK(irq)	((irq >> 32) & 0xffffffffULL)
+ 
+@@ -44,6 +46,9 @@ int iort_iommu_configure_id(struct device *dev, const u32 *id_in);
+ void iort_iommu_get_resv_regions(struct device *dev, struct list_head *head);
+ phys_addr_t acpi_iort_dma_get_max_cpu_address(void);
+ bool iort_gen_used_DeviceID_bitmap(unsigned long *bus_bm, resource_size_t len);
++int iort_pci_vf_its_validate_indices(struct pci_dev *pdev,
++				     const unsigned int *indices,
++				     unsigned int nr_indices);
+ #else
+ static inline u32 iort_msi_map_id(struct device *dev, u32 id)
+ { return id; }
+@@ -64,6 +69,13 @@ static inline
+ void iort_iommu_get_resv_regions(struct device *dev, struct list_head *head)
+ { }
+ 
++static inline int iort_pci_vf_its_validate_indices(struct pci_dev *pdev,
++						   const unsigned int *indices,
++						   unsigned int nr_indices)
++{
++	return -EOPNOTSUPP;
++}
++
+ static inline phys_addr_t acpi_iort_dma_get_max_cpu_address(void)
+ { return PHYS_ADDR_MAX; }
+ #endif
+diff --git a/include/linux/irqchip/arm-gic-v3-its.h b/include/linux/irqchip/arm-gic-v3-its.h
+new file mode 100644
+index 000000000000..004058ca7482
+--- /dev/null
++++ b/include/linux/irqchip/arm-gic-v3-its.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __LINUX_IRQCHIP_ARM_GIC_V3_ITS_H
++#define __LINUX_IRQCHIP_ARM_GIC_V3_ITS_H
++
++#include <linux/types.h>
++
++struct fwnode_handle;
++
++#ifdef CONFIG_ARM_GIC_V3_ITS
++bool gic_its_get_iidr(struct fwnode_handle *fwnode, u32 *iidr);
++#else
++static inline bool gic_its_get_iidr(struct fwnode_handle *fwnode, u32 *iidr)
++{
++	return false;
++}
++#endif
++
++#endif /* __LINUX_IRQCHIP_ARM_GIC_V3_ITS_H */
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index bde130bb1eae..2af6ba565747 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -2387,6 +2387,7 @@ void __iomem *pci_ioremap_wc_bar(struct pci_dev *pdev, int bar);
+ int pci_iov_virtfn_bus(struct pci_dev *dev, int id);
+ int pci_iov_virtfn_devfn(struct pci_dev *dev, int id);
+ int pci_iov_vf_id(struct pci_dev *dev);
++int pci_iov_vf_get_its_index(struct pci_dev *dev, unsigned int *its_index);
+ void *pci_iov_get_pf_drvdata(struct pci_dev *dev, struct pci_driver *pf_driver);
+ int pci_enable_sriov(struct pci_dev *dev, int nr_virtfn);
+ void pci_disable_sriov(struct pci_dev *dev);
+@@ -2421,6 +2422,12 @@ static inline int pci_iov_vf_id(struct pci_dev *dev)
+ 	return -ENOSYS;
+ }
+ 
++static inline int pci_iov_vf_get_its_index(struct pci_dev *dev,
++					   unsigned int *its_index)
++{
++	return -ENODEV;
++}
++
+ static inline void *pci_iov_get_pf_drvdata(struct pci_dev *dev,
+ 					   struct pci_driver *pf_driver)
+ {
+-- 
+2.34.1
+

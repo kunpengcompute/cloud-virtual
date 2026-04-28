@@ -1,0 +1,72 @@
+From dff64a2450016458d776cac58d0d1cc488af0e07 Mon Sep 17 00:00:00 2001
+From: Xie Xiaodong <xiexiaodong16@huawei.com>
+Date: Fri, 10 Apr 2026 16:25:20 +0800
+Subject: [PATCH] PCI: Fix kabi broken for SR-IOV exported symbols
+
+hulk inclusion
+category: bugfix
+bugzilla: https://atomgit.com/openeuler/kernel/issues/8916
+
+----------------------------------------
+
+The VF ITS support change introduced a new IORT header dependency in
+drivers/pci/iov.c and a new helper declaration in include/linux/pci.h.
+Those changes altered genksyms input for existing SR-IOV exported
+symbols and changed their CRCs.
+
+Hide the new include and helper declaration from __GENKSYMS__ so normal
+builds keep the VF ITS functionality while the kabi checker sees the old
+token stream for the existing PCI SR-IOV exports.
+
+Fixes: ab071783d45d ("PCI/ACPI: Support ITS selection for PCI VF devices")
+Signed-off-by: Xie Xiaodong <xiexiaodong16@huawei.com>
+---
+ drivers/pci/iov.c   | 2 ++
+ include/linux/pci.h | 4 ++++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/drivers/pci/iov.c b/drivers/pci/iov.c
+index 825e43783495..8dd7adff9d16 100644
+--- a/drivers/pci/iov.c
++++ b/drivers/pci/iov.c
+@@ -8,7 +8,9 @@
+  */
+ 
+ #include <linux/pci.h>
++#ifndef __GENKSYMS__
+ #include <linux/acpi_iort.h>
++#endif
+ #include <linux/slab.h>
+ #include <linux/export.h>
+ #include <linux/string.h>
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index 2af6ba565747..e474d71578cb 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -2387,7 +2387,9 @@ void __iomem *pci_ioremap_wc_bar(struct pci_dev *pdev, int bar);
+ int pci_iov_virtfn_bus(struct pci_dev *dev, int id);
+ int pci_iov_virtfn_devfn(struct pci_dev *dev, int id);
+ int pci_iov_vf_id(struct pci_dev *dev);
++#ifndef __GENKSYMS__
+ int pci_iov_vf_get_its_index(struct pci_dev *dev, unsigned int *its_index);
++#endif
+ void *pci_iov_get_pf_drvdata(struct pci_dev *dev, struct pci_driver *pf_driver);
+ int pci_enable_sriov(struct pci_dev *dev, int nr_virtfn);
+ void pci_disable_sriov(struct pci_dev *dev);
+@@ -2422,11 +2424,13 @@ static inline int pci_iov_vf_id(struct pci_dev *dev)
+ 	return -ENOSYS;
+ }
+ 
++#ifndef __GENKSYMS__
+ static inline int pci_iov_vf_get_its_index(struct pci_dev *dev,
+ 					   unsigned int *its_index)
+ {
+ 	return -ENODEV;
+ }
++#endif
+ 
+ static inline void *pci_iov_get_pf_drvdata(struct pci_dev *dev,
+ 					   struct pci_driver *pf_driver)
+-- 
+2.34.1
+
