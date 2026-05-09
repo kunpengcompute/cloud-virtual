@@ -43,7 +43,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 
 其中：
 
-- `sriov_vf_its_indices`用于写入VF可使用的ITS raw index数组,属于本特性新增接口。取值范围为0到7。
+- `sriov_vf_its_indices`用于写入VF可使用的ITS raw index数组，属于本特性新增接口。取值范围为0到7。
 - `sriov_numvfs`用于指定该PF创建多少VF设备，数值为0时关闭该PF下的VF，该接口在VF ITS特性开发前已经存在。取值范围不能超过PF设备驱动设定的最大VF数量。
 
 `sriov_vf_its_indices`写入的是IORT ITS列表中的raw index，不是ITS base address，也不是`translation_id`。
@@ -51,7 +51,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 ## 环境要求
 
 
-启用本特性之前，请确认软硬件和权限满足要求。
+启用本特性之前，请确认软硬件环境满足要求。
 
 **硬件要求**
 
@@ -64,7 +64,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 
 | 项目 | 版本或说明 |
 |--|--|
-| OS | `openEuler2403 SP3` |
+| OS | `openEuler 2403 SP3` |
 | 内核源码基线 | `OLK-6.6 6.6.0-133.0.0`  |
 | libvirt | `9.1.0（yum源）`  |
 | qemu | `8.2.0（yum源）`  |
@@ -75,7 +75,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 
 ### 获取补丁
 
-VF ITS补丁来源页如下：
+VF ITS补丁获取链接如下：
 
 ```text
 https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0/vf-its-patch
@@ -89,7 +89,7 @@ https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0/vf-it
 
 ### 获取目标内核源码
 
-克隆openEuler内核源码并切换到`OLK-6.6`分支,确保源码包含tag 6.6.0-133.0.0：
+克隆openEuler内核源码并切换到`OLK-6.6`分支，确保源码包含tag 6.6.0-133.0.0：
 
 ```bash
 git clone https://gitcode.com/openeuler/kernel.git -b OLK-6.6 --depth=1
@@ -103,30 +103,30 @@ git branch --show-current
 OLK-6.6
 ```
 
-合入补丁前，建议确认源码目录干净：
-
-```bash
-git status --short
-```
-
-若命令没有输出，表示当前工作区没有未提交修改。
 
 ### 合入补丁
+1. 合入补丁前，建议确认源码目录干净：
 
-在内核源码根目录执行以下命令，按邮件补丁流合入VF ITS补丁：
+   ```bash
+   git status --short
+   ```
 
-```bash
-git am --reject ~/vf-its-patch/0001-PCI-ACPI-Support-ITS-selection-for-PCI-VF-devices.patch
-git am --reject ~/vf-its-patch/0002-PCI-Fix-kabi-broken-for-SR-IOV-exported-symbols.patch
-git log --oneline -n 2
-```
+    若命令没有输出，表示当前工作区没有未提交修改。
 
-期望最新两条提交类似如下：
+2. 在内核源码根目录执行以下命令，按邮件补丁流合入VF ITS补丁：
 
-```text
-<newest> PCI: Fix kabi broken for SR-IOV exported symbols
-<older>  PCI/ACPI: Support ITS selection for PCI VF devices
-```
+   ```bash
+   git am --reject ~/vf-its-patch/0001-PCI-ACPI-Support-ITS-selection-for-PCI-VF-devices.patch
+   git am --reject ~/vf-its-patch/0002-PCI-Fix-kabi-broken-for-SR-IOV-exported-symbols.patch
+   git log --oneline -n 2
+   ```
+
+   期望最新两条提交类似如下：
+
+   ```text
+   <newest> PCI: Fix kabi broken for SR-IOV exported symbols
+   <older>  PCI/ACPI: Support ITS selection for PCI VF devices
+   ```
 
 
 ## 编译并安装内核
@@ -153,10 +153,10 @@ make binrpm-pkg -j$(nproc)
 
 ### 安装RPM
 
-根据实际生成的RPM文件名安装新内核包。以下命令仅为示例，请在执行前确认内核rpm包是本次构建产物：
+根据实际生成的RPM文件名安装新内核包。以下命令仅为示例，请在执行前确认内核RPM包是本次构建产物：
 
 ```bash
-sudo rpm -ivh 《内核rpm名称》 --force
+sudo rpm -ivh <内核rpm名称> --force
 ```
 
 安装完成后，重启系统使新内核生效：
@@ -176,7 +176,7 @@ rpm -qa | grep '^kernel' | sort
 
 ### 确认PF设备路径
 
-首先确认目标PF的BDF。以下以`0000:03:00.0`为示例，实际操作时请替换为目标设备的BDF：
+首先确认目标PF的BDF。以`0000:03:00.0`为示例，实际操作时请替换为目标设备的BDF。
 
 ```bash
 export PF_BDF=0000:03:00.0
@@ -190,7 +190,7 @@ pwd
 /sys/bus/pci/devices/0000:03:00.0
 ```
 
-确认PF支持SR-IOV且已暴露VF ITS相关节点：
+确认PF支持SR-IOV且已暴露VF ITS相关节点。
 
 ```bash
 ls sriov_totalvfs sriov_numvfs sriov_vf_its_indices
@@ -205,7 +205,7 @@ cat sriov_numvfs
 
 ### 配置前关闭VF
 
-如果PF当前已经启用了VF，请先关闭该PF下的全部VF：
+如果PF当前已经启用了VF，请先关闭该PF下的全部VF。
 
 ```bash
 echo 0 | sudo tee sriov_numvfs
@@ -222,7 +222,7 @@ cat sriov_numvfs
 
 ### 清空旧配置
 
-如果需要清空PF上已经保存的VF ITS raw index配置，可使用以下任一方式：
+如果需要清空PF上已经保存的VF ITS raw index配置，可使用以下任一方式。
 
 ```bash
 echo -1 | sudo tee sriov_vf_its_indices
@@ -245,7 +245,7 @@ cat sriov_vf_its_indices
 
 写入`sriov_vf_its_indices`时，请使用当前平台IORT ITS列表中的raw index。该值不是ITS base address，也不是`translation_id`。
 
-例如，将PF下的VF配置为在raw index `6`和`7`之间循环分配：
+例如，将PF下的VF配置为在raw index `6`和`7`之间循环分配。
 
 ```bash
 echo 6,7 | sudo tee sriov_vf_its_indices
@@ -277,7 +277,7 @@ raw_index = pf->vf_its_indices[vf_id % nr_indices]
 
 ### 启用VF
 
-写入raw index后，再启用VF。以下以创建4个VF为例：
+写入raw index后，再启用VF。以创建4个VF为例。
 
 ```bash
 export VF_COUNT=4
@@ -291,13 +291,13 @@ cat sriov_numvfs
 4
 ```
 
-查看PF下生成的VF软链接：
+查看PF下生成的VF软链接。
 
 ```bash
 ls -l virtfn*
 ```
 
-也可以通过`lspci`查看PF与VF设备：
+也可以通过`lspci`查看PF与VF设备。
 
 ```bash
 lspci -nn | grep -E "${PF_BDF#0000:}|Virtual Function"
@@ -305,7 +305,7 @@ lspci -nn | grep -E "${PF_BDF#0000:}|Virtual Function"
 
 ### 查看运行日志
 
-启用VF后，可通过`dmesg`查看VF ITS解析日志：
+启用VF后，可通过`dmesg`查看VF ITS解析日志。
 
 ```bash
 dmesg | grep -E 'VF ITS|VF uses ITS raw index|sriov_vf_its_indices|ITS raw index'
@@ -319,7 +319,7 @@ VF uses ITS raw index <n> base <base_addr>
 
 ## 当前平台raw index对照表
 
-当前平台raw index与ITS base address的对应关系如下：
+当前平台raw index与ITS base address的对应关系如下所示。
 
 ```text
 index0: 0x7010000000
@@ -347,32 +347,32 @@ index7: 0x0488000000
 
 建议按以下顺序检查VF ITS配置是否生效。
 
-1. 检查PF节点是否存在：
+1. 检查PF节点是否存在。
 
 ```bash
 ls /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
 ```
 
-2. 检查当前配置是否已写入：
+2. 检查当前配置是否已写入。
 
 ```bash
 cat /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
 cat /sys/bus/pci/devices/${PF_BDF}/sriov_numvfs
 ```
 
-3. 检查VF是否已生成：
+3. 检查VF是否已生成。
 
 ```bash
 ls -l /sys/bus/pci/devices/${PF_BDF}/virtfn*
 ```
 
-4. 检查运行日志：
+4. 检查运行日志。
 
 ```bash
 dmesg | grep -E 'VF uses ITS raw index|failed to resolve VF ITS raw index|VF ITS selection'
 ```
 
-### `sriov_numvfs != 0`时写配置失败
+### `sriov_numvfs != 0`时写配置失败的解决方法
 
 **现象**
 
@@ -391,7 +391,7 @@ echo 0 | sudo tee /sys/bus/pci/devices/${PF_BDF}/sriov_numvfs
 echo 6,7 | sudo tee /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
 ```
 
-### raw index非法
+### raw index非法的解决方法
 
 **现象**
 
@@ -411,7 +411,7 @@ requested VF ITS raw index <n> is invalid
 
 对照当前平台raw index对照表重新选择合法raw index，并确认目标ITS已在当前平台上注册且可解析。
 
-### candidate ITS跨socket或违反A/B/C/D规则
+### candidate ITS跨socket或违反A/B/C/D规则的解决方法
 
 **现象**
 
@@ -429,13 +429,13 @@ VF ITS raw index <n> base <addr> is not allowed for PF ITS base <addr>
 
 **处理方法**
 
-先确认PF当前实际使用的ITS，再按当前平台规则重新选择candidate raw index：
+先确认PF当前实际使用的ITS，再按当前平台规则重新选择candidate raw index。
 
 - PF在A时，只能选择同socket的A。
 - PF在B、C、D时，只能选择同socket的B、C、D。
 - 不允许跨socket选择。
 
-### PF当前ITS芯片不满足`GITS_IIDR == 0x00070736U`
+### PF当前ITS芯片不满足`GITS_IIDR == 0x00070736U`的解决方法
 
 **现象**
 
@@ -461,7 +461,7 @@ VF ITS selection is unavailable for PF ITS base <addr>: unable to identify ITS c
 
 确认当前服务器芯片符合该特性的受支持范围，并确认PF当前ITS已正确初始化，且可以获取到`GITS_IIDR`。
 
-### VF运行时无法获得目标MSI domain
+### VF运行时无法获得目标MSI domain的解决方法
 
 **现象**
 
