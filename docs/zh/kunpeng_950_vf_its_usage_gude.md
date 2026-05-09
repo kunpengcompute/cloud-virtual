@@ -303,6 +303,9 @@ ls -l virtfn*
 lspci -nn | grep -E "${PF_BDF#0000:}|Virtual Function"
 ```
 
+**注意事项**
+1、NVME盘VF设备创建，需要参考NVME盘驱动的VF设备创建指南。
+
 ### 查看运行日志
 
 启用VF后，可通过`dmesg`查看VF ITS解析日志。
@@ -322,14 +325,14 @@ VF uses ITS raw index <n> base <base_addr>
 当前平台raw index与ITS base address的对应关系如下所示。
 
 ```text
-index0: 0x7010000000
-index1: 0x6888000000
-index2: 0x4588000000
-index3: 0x4488000000
-index4: 0x3010000000
-index5: 0x2888000000
-index6: 0x0588000000
-index7: 0x0488000000
+socket 1 ITS A: index0: 0x7010000000
+socket 1 ITS B: index1: 0x6888000000
+socket 1 ITS C: index2: 0x4588000000
+socket 1 ITS D: index3: 0x4488000000
+socket 0 ITS A: index4: 0x3010000000
+socket 0 ITS B: index5: 0x2888000000
+socket 0 ITS C: index6: 0x0588000000
+socket 0 ITS D: index7: 0x0488000000
 ```
 
 该表只适用于当前平台和当前IORT ITS注册顺序，不应作为跨平台稳定ABI使用。
