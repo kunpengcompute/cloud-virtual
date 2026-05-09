@@ -1,4 +1,4 @@
-# VF设备选择ITS用户指南
+# VF设备选择ITS 用户指南
 
 ## 介绍
 
@@ -6,7 +6,7 @@
 
 本文介绍如何在鲲鹏950服务器中部署和使用VF设备选择ITS新特性。
 
-在支持多个ITS（Interrupt Translation Service）的服务器平台上，物理PCI设备PF（Physical Function）下创建的虚拟pci设备VF（Virtual Function）默认通常沿用IORT/PCI的设备中断域解析路径。该默认路径迫使VF设备只能选择与PF设备相同的ITS,当PF设备所使用的ITS压力过大时，会导致VF设备性能受到影响。
+在支持多个ITS（Interrupt Translation Service，中断翻译服务）的服务器平台上，物理PCI设备PF（Physical Function）下创建的虚拟PCI设备VF（Virtual Function）默认通常沿用IORT/PCI的设备中断域解析路径。该默认路径迫使VF设备只能选择与PF设备相同的ITS，当PF设备所使用的ITS压力过大时，会导致VF设备性能受到影响。
 
 VF设备选择ITS新特性提供PF级sysfs接口，允许用户为某个PF配置一组VF可使用的ITS设备（通过指定ITS raw index）。内核在接受配置前会根据PF当前实际使用的ITS设备、平台拓扑规则和芯片能力白名单进行校验。只有全部条件满足时，配置才会被保存并在后续VF枚举时生效。
 
