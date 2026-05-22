@@ -1,0 +1,203 @@
+From cab16d2cd496e3314877ba5ab7dd52281a34c980 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt11@noreply.gitcode.com>
+Date: Tue, 28 Apr 2026 20:20:15 +0800
+Subject: [PATCH 04/11] libvirt: add cacheinfo parmater UT
+
+---
+ tests/cputest.c                               | 24 ++++++++++++++
+ .../x86_64-cacheinfo-defaults-result.xml      |  7 ++++
+ .../cputestdata/x86_64-cacheinfo-defaults.xml |  7 ++++
+ .../x86_64-cacheinfo-full-result.xml          |  7 ++++
+ tests/cputestdata/x86_64-cacheinfo-full.xml   |  7 ++++
+ .../cpu-cacheinfo.x86_64-latest.args          | 33 +++++++++++++++++++
+ tests/qemuxml2argvdata/cpu-cacheinfo.xml      | 24 ++++++++++++++
+ tests/qemuxml2argvtest.c                      |  1 +
+ 8 files changed, 110 insertions(+)
+ create mode 100644 tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
+ create mode 100644 tests/cputestdata/x86_64-cacheinfo-defaults.xml
+ create mode 100644 tests/cputestdata/x86_64-cacheinfo-full-result.xml
+ create mode 100644 tests/cputestdata/x86_64-cacheinfo-full.xml
+ create mode 100644 tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+ create mode 100644 tests/qemuxml2argvdata/cpu-cacheinfo.xml
+
+diff --git a/tests/cputest.c b/tests/cputest.c
+index b3253e3116..92bdc61b89 100644
+--- a/tests/cputest.c
++++ b/tests/cputest.c
+@@ -372,6 +372,22 @@ cpuTestUpdate(const void *arg)
+ }
+ 
+ 
++static int
++cpuTestCacheInfo(const void *arg)
++{
++    const struct data *data = arg;
++    g_autoptr(virCPUDef) cpu = NULL;
++    g_autofree char *result = NULL;
++
++    if (!(cpu = cpuTestLoadXML(data->arch, data->name)))
++        return -1;
++
++    result = g_strdup_printf("%s-result", data->name);
++
++    return cpuTestCompareXML(data->arch, cpu, result);
++}
++
++
+ static int
+ cpuTestHasFeature(const void *arg)
+ {
+@@ -1092,6 +1108,14 @@ mymain(void)
+     DO_TEST_UPDATE_ONLY(VIR_ARCH_X86_64, "host", "host-passthrough");
+     DO_TEST_UPDATE_ONLY(VIR_ARCH_X86_64, "host", "host-passthrough-features");
+ 
++    /* cacheinfo parameter details tests */
++    DO_TEST(VIR_ARCH_X86_64, cpuTestCacheInfo,
++            "cacheinfo-full",
++            NULL, "cacheinfo-full", NULL, 0, NULL, 0, 0);
++    DO_TEST(VIR_ARCH_X86_64, cpuTestCacheInfo,
++            "cacheinfo-defaults",
++            NULL, "cacheinfo-defaults", NULL, 0, NULL, 0, 0);
++
+     DO_TEST_UPDATE(VIR_ARCH_PPC64, "host", "guest", VIR_CPU_COMPARE_IDENTICAL);
+     DO_TEST_UPDATE(VIR_ARCH_PPC64, "host", "guest-nofallback", VIR_CPU_COMPARE_INCOMPATIBLE);
+     DO_TEST_UPDATE(VIR_ARCH_PPC64, "host", "guest-legacy", VIR_CPU_COMPARE_IDENTICAL);
+diff --git a/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml b/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
+new file mode 100644
+index 0000000000..4eca5da051
+--- /dev/null
++++ b/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
+@@ -0,0 +1,7 @@
++<cpu mode='host-passthrough' migratable='off'>
++  <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
++  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo name='l3' location='cluster' size='23068672' sets='16384' associativity='19' line='64'/>
++</cpu>
+diff --git a/tests/cputestdata/x86_64-cacheinfo-defaults.xml b/tests/cputestdata/x86_64-cacheinfo-defaults.xml
+new file mode 100644
+index 0000000000..d32419bb4d
+--- /dev/null
++++ b/tests/cputestdata/x86_64-cacheinfo-defaults.xml
+@@ -0,0 +1,7 @@
++<cpu mode='host-passthrough' migratable='off'>
++  <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
++  <cacheinfo name='l1i'/>
++  <cacheinfo name='l1d'/>
++  <cacheinfo name='l2'/>
++  <cacheinfo name='l3'/>
++</cpu>
+\ No newline at end of file
+diff --git a/tests/cputestdata/x86_64-cacheinfo-full-result.xml b/tests/cputestdata/x86_64-cacheinfo-full-result.xml
+new file mode 100644
+index 0000000000..4d3f21783f
+--- /dev/null
++++ b/tests/cputestdata/x86_64-cacheinfo-full-result.xml
+@@ -0,0 +1,7 @@
++<cpu mode='host-passthrough' migratable='off'>
++  <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
++  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++</cpu>
+diff --git a/tests/cputestdata/x86_64-cacheinfo-full.xml b/tests/cputestdata/x86_64-cacheinfo-full.xml
+new file mode 100644
+index 0000000000..b8a22624cf
+--- /dev/null
++++ b/tests/cputestdata/x86_64-cacheinfo-full.xml
+@@ -0,0 +1,7 @@
++<cpu mode='host-passthrough' migratable='off'>
++  <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
++  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++</cpu>
+\ No newline at end of file
+diff --git a/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+new file mode 100644
+index 0000000000..ccdf25230a
+--- /dev/null
++++ b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+@@ -0,0 +1,33 @@
++LC_ALL=C \
++PATH=/bin \
++HOME=/var/lib/libvirt/qemu/domain--1-foo \
++USER=test \
++LOGNAME=test \
++XDG_DATA_HOME=/var/lib/libvirt/qemu/domain--1-foo/.local/share \
++XDG_CACHE_HOME=/var/lib/libvirt/qemu/domain--1-foo/.cache \
++XDG_CONFIG_HOME=/var/lib/libvirt/qemu/domain--1-foo/.config \
++/usr/bin/qemu-system-x86_64 \
++-name guest=foo,debug-threads=on \
++-S \
++-object '{"qom-type":"secret","id":"masterKey0","format":"raw","file":"/var/lib/libvirt/qemu/domain--1-foo/master-key.aes"}' \
++-machine pc,usb=off,dump-guest-core=off,memory-backend=pc.ram,acpi=off,smp-cache.0.name=l1i,smp-cache.0.location=core,smp-cache.0.size=131072,smp-cache.0.sets=512,smp-cache.0.associativity=4,smp-cache.0.line=64,smp-cache.1.name=l1d,smp-cache.1.location=core,smp-cache.1.size=65536,smp-cache.1.sets=256,smp-cache.1.associativity=4,smp-cache.1.line=64,smp-cache.2.name=l2,smp-cache.2.location=core,smp-cache.2.size=1048576,smp-cache.2.sets=2048,smp-cache.2.associativity=8,smp-cache.2.line=64,smp-cache.3.name=l3,smp-cache.3.location=cluster,smp-cache.3.size=23855104,smp-cache.3.sets=16384,smp-cache.3.associativity=19,smp-cache.3.line=64 \
++-accel kvm \
++-cpu host,migratable=off \
++-m size=219136k \
++-object '{"qom-type":"memory-backend-ram","id":"pc.ram","size":224395264}' \
++-overcommit mem-lock=off \
++-smp 4,sockets=1,dies=1,clusters=1,cores=4,threads=1 \
++-uuid c7a5fdbd-edaf-9455-926a-d65c16db1809 \
++-display none \
++-no-user-config \
++-nodefaults \
++-chardev socket,id=charmonitor,fd=1729,server=on,wait=off \
++-mon chardev=charmonitor,id=monitor,mode=control \
++-rtc base=utc \
++-no-shutdown \
++-boot strict=on \
++-device '{"driver":"piix3-usb-uhci","id":"usb","bus":"pci.0","addr":"0x1.0x2"}' \
++-audiodev '{"id":"audio1","driver":"none"}' \
++-device '{"driver":"virtio-balloon-pci","id":"balloon0","bus":"pci.0","addr":"0x2"}' \
++-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
++-msg timestamp=on
+diff --git a/tests/qemuxml2argvdata/cpu-cacheinfo.xml b/tests/qemuxml2argvdata/cpu-cacheinfo.xml
+new file mode 100644
+index 0000000000..3cedb25cc2
+--- /dev/null
++++ b/tests/qemuxml2argvdata/cpu-cacheinfo.xml
+@@ -0,0 +1,24 @@
++<domain type='kvm'>
++  <name>foo</name>
++  <uuid>c7a5fdbd-edaf-9455-926a-d65c16db1809</uuid>
++  <memory unit='KiB'>219136</memory>
++  <currentMemory unit='KiB'>219136</currentMemory>
++  <vcpu placement='static'>4</vcpu>
++  <os>
++    <type arch='x86_64' machine='pc'>hvm</type>
++    <boot dev='hd'/>
++  </os>
++  <cpu mode='host-passthrough' migratable='off'>
++    <topology sockets='1' dies='1' clusters='1' cores='4' threads='1'/>
++    <cacheinfo name='l1i' location='core' size='131072' sets='512' associativity='4' line='64'/>
++    <cacheinfo name='l1d' location='core' size='65536' sets='256' associativity='4' line='64'/>
++    <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++    <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++  </cpu>
++  <clock offset='utc'/>
++  <on_poweroff>destroy</on_poweroff>
++  <on_reboot>restart</on_reboot>
++  <on_crash>destroy</on_crash>
++  <devices>
++  </devices>
++</domain>
+\ No newline at end of file
+diff --git a/tests/qemuxml2argvtest.c b/tests/qemuxml2argvtest.c
+index 160dac876f..99b9a283e8 100644
+--- a/tests/qemuxml2argvtest.c
++++ b/tests/qemuxml2argvtest.c
+@@ -2298,6 +2298,7 @@ mymain(void)
+     DO_TEST_CAPS_LATEST_PARSE_ERROR("cpu-cache-emulate-l2");
+     DO_TEST_CAPS_LATEST_PARSE_ERROR("cpu-cache-passthrough3");
+     DO_TEST_CAPS_LATEST_PARSE_ERROR("cpu-cache-passthrough-l3");
++    DO_TEST_CAPS_LATEST("cpu-cacheinfo");
+     DO_TEST_CAPS_LATEST("vmcoreinfo");
+ 
+     DO_TEST_CAPS_LATEST("user-aliases");
+-- 
+2.34.1
+

@@ -1,0 +1,242 @@
+From 93be9eba93b717292b4a001f62d83d32f67281ff Mon Sep 17 00:00:00 2001
+From: Chengfei Huang <huangchengfei3@huawei.com>
+Date: Tue, 25 Feb 2025 15:46:50 +0800
+Subject: [PATCH 01/11] libvirt: Support specifying the cache size presented to
+ guest
+
+Add configuration item to specifying the cache size presented to guest in Bytes.
+for example:
+<cpu mode="host-passthrough">
+    <topology sockets='2' cores='2' threads='1'/>
+    <cacheinfo cache='l1d' size='32768'/>
+    <cacheinfo cache='l1i' size='32768'/>
+    <cacheinfo cache='l2' size='1048576'/>
+</cpu>
+---
+ src/conf/cpu_conf.c      | 92 +++++++++++++++++++++++++++++++++++++++-
+ src/conf/cpu_conf.h      | 21 +++++++++
+ src/libvirt_private.syms |  2 +
+ src/qemu/qemu_command.c  | 10 +++++
+ 4 files changed, 124 insertions(+), 1 deletion(-)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index 6e6e1b9a89..ea5f9c14b8 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -88,6 +88,14 @@ VIR_ENUM_IMPL(virCPUMaxPhysAddrMode,
+               "passthrough",
+ );
+ 
++VIR_ENUM_IMPL(virCPUCacheLevelAndType,
++              VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST,
++              "l1d",
++              "l1i",
++              "l1",
++              "l2",
++              "l3",
++);
+ 
+ virCPUDef *virCPUDefNew(void)
+ {
+@@ -135,6 +143,7 @@ virCPUDefFree(virCPUDef *def)
+         g_free(def->cache);
+         g_free(def->addr);
+         g_free(def->tsc);
++        g_free(def->cacheinfo);
+         g_free(def);
+     }
+ }
+@@ -260,6 +269,16 @@ virCPUDefCopyWithoutModel(const virCPUDef *cpu)
+         *copy->addr = *cpu->addr;
+     }
+ 
++    if (cpu->ncacheinfo > 0) {
++        copy->cacheinfo = g_new0(virCPUCacheInfoDef, cpu->ncacheinfo);
++
++        for (size_t i = 0; i < cpu->ncacheinfo; i++) {
++            copy->cacheinfo[i] = cpu->cacheinfo[i];
++        }
++
++        copy->ncacheinfo = cpu->ncacheinfo;
++    }
++
+     if (cpu->tsc) {
+         copy->tsc = g_new0(virHostCPUTscInfo, 1);
+         *copy->tsc = *cpu->tsc;
+@@ -279,7 +298,6 @@ virCPUDefCopy(const virCPUDef *cpu)
+     return g_steal_pointer(&copy);
+ }
+ 
+-
+ int
+ virCPUDefParseXMLString(const char *xml,
+                         virCPUType type,
+@@ -648,6 +666,56 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+         def->features[i].policy = policy;
+     }
+ 
++    if ((n = virXPathNodeSet("./cacheinfo", ctxt, &nodes)) < 0)
++        return -1;
++
++    if (n > VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST) {
++        virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
++            _("Exceeded the maximum number of cacheinfo"));
++        return -1;
++    }
++
++    if (n > 0) {
++        def->cacheinfo = g_new0(virCPUCacheInfoDef, n);
++        def->ncacheinfo = n;
++    }
++
++    for (i = 0; i < n; i++) {
++        virCPUCacheLevelAndType cache;
++        char *tmp;
++        unsigned long long size;
++
++        tmp = virXMLPropString(nodes[i], "cache");
++        if (tmp == NULL) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
++                           _("Missing cache level and type"));
++            return -1;
++        }
++        cache = virCPUCacheLevelAndTypeTypeFromString(tmp);
++        VIR_FREE(tmp);
++
++        if (cache < 0) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
++                           _("Invalid CPU cache level and type"));
++            return -1;
++        }
++
++        tmp = virXMLPropString(nodes[i], "size");
++        if (tmp == NULL) {
++            size = 0;
++        }
++        if (virStrToLong_ullp(tmp, NULL, 10, &size) < 0) {
++            virReportError(VIR_ERR_XML_ERROR,
++                            _("invalid setting for cache size '%s'"), tmp);
++            VIR_FREE(tmp);
++            return -1;
++        }
++        VIR_FREE(tmp);
++
++        def->cacheinfo[i].cache = cache;
++        def->cacheinfo[i].size = size;
++    }
++
+     if ((ncacheNodes = virXPathNodeSet("./cache", ctxt, &cacheNodes)) > 0) {
+         if (ncacheNodes > 1) {
+             virReportError(VIR_ERR_XML_ERROR, "%s",
+@@ -864,6 +932,14 @@ virCPUDefFormatBuf(virBuffer *buf,
+         virBufferAddLit(buf, "/>\n");
+     }
+ 
++    for (i = 0; i < def->ncacheinfo; i++) {
++        virCPUCacheInfoDefPtr cacheinfo = def->cacheinfo + i;
++
++        virBufferAsprintf(buf, "<cacheinfo cache='%s' size='%llu'/>\n",
++                          virCPUCacheLevelAndTypeTypeToString(cacheinfo->cache),
++                          cacheinfo->size);
++    }
++
+     for (i = 0; i < def->nfeatures; i++) {
+         virCPUFeatureDef *feature = def->features + i;
+ 
+@@ -1171,6 +1247,20 @@ virCPUDefIsEqual(virCPUDef *src,
+         return false;
+     }
+ 
++    if (src->ncacheinfo != dst->ncacheinfo) {
++        MISMATCH(_("Target CPU cacheinfo count %zu does not match source %zu"),
++                 dst->ncacheinfo, src->ncacheinfo);
++        return false;
++    }
++
++    for (i = 0; i < src->ncacheinfo; i++) {
++        if (src->cacheinfo[i].cache != dst->cacheinfo[i].cache ||
++            src->cacheinfo[i].size != dst->cacheinfo[i].size) {
++            MISMATCH("%s", _("Target CPU cacheinfo does not match source"));
++            return false;
++        }
++    }
++
+ #undef MISMATCH
+ 
+     return true;
+diff --git a/src/conf/cpu_conf.h b/src/conf/cpu_conf.h
+index 2694022fed..66d60715d4 100644
+--- a/src/conf/cpu_conf.h
++++ b/src/conf/cpu_conf.h
+@@ -115,6 +115,25 @@ struct _virCPUCacheDef {
+     virCPUCacheMode mode;
+ };
+ 
++typedef enum {
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D,
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I,
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_L1,
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_L2,
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_L3,
++
++    VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST
++} virCPUCacheLevelAndType;
++
++VIR_ENUM_DECL(virCPUCacheLevelAndType);
++
++typedef struct _virCPUCacheInfoDef virCPUCacheInfoDef;
++typedef virCPUCacheInfoDef *virCPUCacheInfoDefPtr;
++struct _virCPUCacheInfoDef {
++    virCPUCacheLevelAndType cache;
++    unsigned long long size;
++};
++
+ 
+ typedef enum {
+     VIR_CPU_MAX_PHYS_ADDR_MODE_EMULATE,
+@@ -161,6 +180,8 @@ struct _virCPUDef {
+     virCPUMaxPhysAddrDef *addr;
+     virHostCPUTscInfo *tsc;
+     virTristateSwitch migratable; /* for host-passthrough mode */
++    size_t ncacheinfo;
++    virCPUCacheInfoDef *cacheinfo;
+ };
+ 
+ virCPUDef *virCPUDefNew(void);
+diff --git a/src/libvirt_private.syms b/src/libvirt_private.syms
+index 4e6a0d6f65..4d9dee343c 100644
+--- a/src/libvirt_private.syms
++++ b/src/libvirt_private.syms
+@@ -93,6 +93,8 @@ virDomainCheckpointTypeToString;
+ 
+ 
+ # conf/cpu_conf.h
++virCPUCacheLevelAndTypeTypeFromString;
++virCPUCacheLevelAndTypeTypeToString;
+ virCPUCacheModeTypeFromString;
+ virCPUCacheModeTypeToString;
+ virCPUDefAddFeature;
+diff --git a/src/qemu/qemu_command.c b/src/qemu/qemu_command.c
+index 6780d1ed76..25e4c8edac 100644
+--- a/src/qemu/qemu_command.c
++++ b/src/qemu/qemu_command.c
+@@ -7302,6 +7302,16 @@ qemuBuildMachineCommandLine(virCommand *cmd,
+     }
+ 
+     qemuBuildMachineACPI(&buf, def, qemuCaps);
++    if (cpu) {
++        for (i = 0; i < cpu->ncacheinfo; i++) {
++            const char *str;
++            str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].cache);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.cache=%s", i, str);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.size=%llu", i,
++                              cpu->cacheinfo[i].size);
++        }
++    }
++
+     virCommandAddArgBuffer(cmd, &buf);
+ 
+     return 0;
+-- 
+2.34.1
+

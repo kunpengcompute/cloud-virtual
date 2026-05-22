@@ -1,0 +1,27 @@
+From 5acc7ffcb8c072370629f4cdce212cf1dcfe42f4 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Fri, 15 May 2026 17:30:13 +0800
+Subject: [PATCH 10/12] qemu: arm64:add cache_supported for all cache levels in
+ ARM virt machine
+
+---
+ hw/arm/virt.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index 6b54a01735..1f991beac9 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -4336,6 +4336,9 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
+     hc->unplug = virt_machine_device_unplug_cb;
+     mc->nvdimm_supported = true;
+     mc->smp_props.clusters_supported = true;
++    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
++        mc->smp_props.cache_supported[i] = true;
++    }
+     mc->auto_enable_numa_with_memhp = true;
+     mc->auto_enable_numa_with_memdev = true;
+     /* platform instead of architectural choice */
+-- 
+2.34.1
+

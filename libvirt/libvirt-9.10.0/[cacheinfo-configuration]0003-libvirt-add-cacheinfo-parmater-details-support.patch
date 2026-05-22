@@ -1,0 +1,407 @@
+From 4259883f6277e99c24406de4d4d624c5e6b359b3 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt11@noreply.gitcode.com>
+Date: Fri, 24 Apr 2026 10:55:31 +0800
+Subject: [PATCH 03/11] libvirt: add cacheinfo parmater details support ```    
+ <cpu mode='host-passthrough' migratable='off'>       <topology sockets='2'
+ dies='1' clusters='2' cores='8' threads='2'/>       <cacheinfo name='L1i'
+ location='core' size=131072 sets=512 associativity=4 line=64/>      
+ <cacheinfo name='L1d' location='core' size=65536 sets=256 associativity=4
+ line=64/>       <cacheinfo name='L2' location='core' size=1048576 sets=2048
+ associativity=8 line=64/>       <cacheinfo name='L3' location='cluster'
+ size=23855104 sets=16384 associativity=19 line=64/>     </cpu> ```
+
+---
+ src/conf/cpu_conf.c           | 191 +++++++++++++++++++++++++++++++---
+ src/conf/cpu_conf.h           |  20 +++-
+ src/conf/schemas/cputypes.rng |  47 +++++++++
+ src/libvirt_private.syms      |   1 +
+ src/qemu/qemu_command.c       |  12 ++-
+ 5 files changed, 253 insertions(+), 18 deletions(-)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index ad04f530f8..878b769a5a 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -98,6 +98,15 @@ VIR_ENUM_IMPL(virCPUCacheLevelAndType,
+               "l3",
+ );
+ 
++VIR_ENUM_IMPL(virCPUCacheLevelBindLocation,
++              VIR_CPU_CACHE_LEVEL_BIND_LOCATION_LAST,
++              "thread",
++              "core",
++              "cluster",
++              "die",
++              "socket",
++);
++
+ virCPUDef *virCPUDefNew(void)
+ {
+     virCPUDef *cpu = g_new0(virCPUDef, 1);
+@@ -350,6 +359,104 @@ virCPUDefParseXMLCache(virCPUDef *def,
+     return 0;
+ }
+ 
++/*
++ * cache info 透传功能相关参数的默认值函数
++ */
++static virCPUCacheLevelBindLocation
++virGetCacheInfoDefaultLocation(virCPUCacheLevelAndType name)
++{
++    switch (name)
++    {
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
++        return VIR_CPU_CACHE_LEVEL_BIND_LOCATION_CORE;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
++        return VIR_CPU_CACHE_LEVEL_BIND_LOCATION_CLUSTER;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
++    default:
++        return VIR_CPU_CACHE_LEVEL_BIND_LOCATION_LAST;
++    }
++}
++
++static unsigned int
++virGetCacheInfoDefaultSize(virCPUCacheLevelAndType name)
++{
++    switch (name)
++    {
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
++        return 32 * 1024;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
++        return 64 * 1024;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
++        return 64 * 1024;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
++        return 1024 * 1024;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
++        return 22 * 1024 * 1024;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
++    default:
++        return 0;
++    }
++}
++
++static unsigned int
++virGetCacheInfoDefaultLine(virCPUCacheLevelAndType name)
++{
++    switch (name)
++    {
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
++        return 64;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
++    default:
++        return 0;
++    }
++}
++
++static unsigned int
++virGetCacheInfoDefaultAssociativity(virCPUCacheLevelAndType name)
++{
++    switch (name)
++    {
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
++        return 0x4;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
++        return 0x8;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
++        return 0x13;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
++    default:
++        return 0;
++    }
++}
++
++static unsigned int
++virGetCacheInfoDefaultSets(virCPUCacheLevelAndType name)
++{
++    switch (name)
++    {
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
++        return 256;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
++        return 512;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
++        return 512;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
++        return 2048;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
++        return 16384;
++    case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
++    default:
++        return 0;
++    }
++}
+ 
+ /*
+  * Parses CPU definition XML from a node pointed to by @xpath. If @xpath is
+@@ -682,30 +789,48 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+     }
+ 
+     for (i = 0; i < n; i++) {
+-        virCPUCacheLevelAndType cache;
++        virCPUCacheLevelAndType cache_name;
++        virCPUCacheLevelBindLocation location;
+         char *tmp;
+-        unsigned long long size;
++        unsigned int size;
++        unsigned int sets;
++        unsigned int associativity;
++        unsigned int line;
+ 
+-        tmp = virXMLPropString(nodes[i], "cache");
++        tmp = virXMLPropString(nodes[i], "name");
+         if (tmp == NULL) {
+             virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                            _("Missing cache level and type"));
+             return -1;
+         }
+-        cache = virCPUCacheLevelAndTypeTypeFromString(tmp);
++        cache_name = virCPUCacheLevelAndTypeTypeFromString(tmp);
+         VIR_FREE(tmp);
+ 
+-        if (cache < 0) {
++        if (cache_name < 0) {
+             virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                            _("Invalid CPU cache level and type"));
+             return -1;
+         }
+ 
++        tmp = virXMLPropString(nodes[i], "location");
++        if (tmp == NULL) {
++            location = virGetCacheInfoDefaultLocation(cache_name);
++        }
++        else {
++            location = virCPUCacheLevelBindLocationTypeFromString(tmp);
++        }
++        VIR_FREE(tmp);
++        if (location < 0) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
++                           _("Invalid cache bind location"));
++            return -1;
++        }
++
+         tmp = virXMLPropString(nodes[i], "size");
+         if (tmp == NULL) {
+-            size = 0;
++            size = virGetCacheInfoDefaultSize(cache_name);
+         }
+-        if (virStrToLong_ullp(tmp, NULL, 10, &size) < 0) {
++        else if (virStrToLong_ui(tmp, NULL, 10, &size) < 0) {
+             virReportError(VIR_ERR_XML_ERROR,
+                             _("invalid setting for cache size '%s'"), tmp);
+             VIR_FREE(tmp);
+@@ -713,8 +838,48 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+         }
+         VIR_FREE(tmp);
+ 
+-        def->cacheinfo[i].cache = cache;
++        tmp = virXMLPropString(nodes[i], "sets");
++        if (tmp == NULL) {
++            sets = virGetCacheInfoDefaultSets(cache_name);
++        }
++        else if (virStrToLong_ui(tmp, NULL, 10, &sets) < 0) {
++            virReportError(VIR_ERR_XML_ERROR,
++                            _("invalid setting for cache sets '%s'"), tmp);
++            VIR_FREE(tmp);
++            return -1;
++        }
++        VIR_FREE(tmp);
++
++        tmp = virXMLPropString(nodes[i], "associativity");
++        if (tmp == NULL) {
++            associativity = virGetCacheInfoDefaultAssociativity(cache_name);
++        }
++        else if (virStrToLong_ui(tmp, NULL, 10, &associativity) < 0) {
++            virReportError(VIR_ERR_XML_ERROR,
++                            _("invalid setting for cache associativity '%s'"), tmp);
++            VIR_FREE(tmp);
++            return -1;
++        }
++        VIR_FREE(tmp);
++
++        tmp = virXMLPropString(nodes[i], "line");
++        if (tmp == NULL) {
++            line = virGetCacheInfoDefaultLine(cache_name);
++        }
++        else if (virStrToLong_ui(tmp, NULL, 10, &line) < 0) {
++            virReportError(VIR_ERR_XML_ERROR,
++                            _("invalid setting for cache line '%s'"), tmp);
++            VIR_FREE(tmp);
++            return -1;
++        }
++        VIR_FREE(tmp);
++
++        def->cacheinfo[i].name = cache_name;
+         def->cacheinfo[i].size = size;
++        def->cacheinfo[i].sets = sets;
++        def->cacheinfo[i].associativity = associativity;
++        def->cacheinfo[i].line = line;
++        def->cacheinfo[i].location = location;
+     }
+ 
+     if ((ncacheNodes = virXPathNodeSet("./cache", ctxt, &cacheNodes)) > 0) {
+@@ -936,9 +1101,11 @@ virCPUDefFormatBuf(virBuffer *buf,
+     for (i = 0; i < def->ncacheinfo; i++) {
+         virCPUCacheInfoDefPtr cacheinfo = def->cacheinfo + i;
+ 
+-        virBufferAsprintf(buf, "<cacheinfo cache='%s' size='%llu'/>\n",
+-                          virCPUCacheLevelAndTypeTypeToString(cacheinfo->cache),
+-                          cacheinfo->size);
++        virBufferAsprintf(buf, 
++                          "<cacheinfo name='%s' location='%s' size='%u' sets='%u' associativity='%u' line='%u'/>\n",
++                          virCPUCacheLevelAndTypeTypeToString(cacheinfo->name),
++                          virCPUCacheLevelBindLocationTypeToString(cacheinfo->location),
++                          cacheinfo->size, cacheinfo->sets, cacheinfo->associativity, cacheinfo->line);
+     }
+ 
+     for (i = 0; i < def->nfeatures; i++) {
+@@ -1255,7 +1422,7 @@ virCPUDefIsEqual(virCPUDef *src,
+     }
+ 
+     for (i = 0; i < src->ncacheinfo; i++) {
+-        if (src->cacheinfo[i].cache != dst->cacheinfo[i].cache ||
++        if (src->cacheinfo[i].name != dst->cacheinfo[i].name ||
+             src->cacheinfo[i].size != dst->cacheinfo[i].size) {
+             MISMATCH("%s", _("Target CPU cacheinfo does not match source"));
+             return false;
+diff --git a/src/conf/cpu_conf.h b/src/conf/cpu_conf.h
+index 66d60715d4..555db7dd09 100644
+--- a/src/conf/cpu_conf.h
++++ b/src/conf/cpu_conf.h
+@@ -127,11 +127,27 @@ typedef enum {
+ 
+ VIR_ENUM_DECL(virCPUCacheLevelAndType);
+ 
++typedef enum {
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_THREAD,
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_CORE,
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_CLUSTER,
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_DIE,
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_SOCKET,
++
++    VIR_CPU_CACHE_LEVEL_BIND_LOCATION_LAST
++} virCPUCacheLevelBindLocation;
++
++VIR_ENUM_DECL(virCPUCacheLevelBindLocation);
++
+ typedef struct _virCPUCacheInfoDef virCPUCacheInfoDef;
+ typedef virCPUCacheInfoDef *virCPUCacheInfoDefPtr;
+ struct _virCPUCacheInfoDef {
+-    virCPUCacheLevelAndType cache;
+-    unsigned long long size;
++    virCPUCacheLevelAndType name;
++    virCPUCacheLevelBindLocation location;
++    unsigned int size;
++    unsigned int sets;
++    unsigned int associativity;
++    unsigned int line;
+ };
+ 
+ 
+diff --git a/src/conf/schemas/cputypes.rng b/src/conf/schemas/cputypes.rng
+index 3a8910e09f..b54f437f82 100644
+--- a/src/conf/schemas/cputypes.rng
++++ b/src/conf/schemas/cputypes.rng
+@@ -466,8 +466,55 @@
+         <optional>
+           <ref name="cpuMaxPhysAddr"/>
+         </optional>
++        <zeroOrMore>
++          <ref name="cpuCacheInfo"/>
++        </zeroOrMore>
+       </interleave>
+     </element>
+   </define>
+ 
++  <define name="cpuCacheInfo">
++    <element name="cacheinfo">
++      <attribute name="name">
++        <choice>
++          <value>l1i</value>
++          <value>l1d</value>
++          <value>l1</value>
++          <value>l2</value>
++          <value>l3</value>
++        </choice>
++      </attribute>
++      <optional>
++        <attribute name="location">
++          <choice>
++            <value>thread</value>
++            <value>core</value>
++            <value>cluster</value>
++            <value>die</value>
++            <value>socket</value>
++          </choice>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="size">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="sets">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="associativity">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="line">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++    </element>
++  </define>
+ </grammar>
+diff --git a/src/libvirt_private.syms b/src/libvirt_private.syms
+index 4d9dee343c..0bba68f813 100644
+--- a/src/libvirt_private.syms
++++ b/src/libvirt_private.syms
+@@ -95,6 +95,7 @@ virDomainCheckpointTypeToString;
+ # conf/cpu_conf.h
+ virCPUCacheLevelAndTypeTypeFromString;
+ virCPUCacheLevelAndTypeTypeToString;
++virCPUCacheLevelBindLocationTypeToString;
+ virCPUCacheModeTypeFromString;
+ virCPUCacheModeTypeToString;
+ virCPUDefAddFeature;
+diff --git a/src/qemu/qemu_command.c b/src/qemu/qemu_command.c
+index 25e4c8edac..2cefc7c634 100644
+--- a/src/qemu/qemu_command.c
++++ b/src/qemu/qemu_command.c
+@@ -7305,10 +7305,14 @@ qemuBuildMachineCommandLine(virCommand *cmd,
+     if (cpu) {
+         for (i = 0; i < cpu->ncacheinfo; i++) {
+             const char *str;
+-            str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].cache);
+-            virBufferAsprintf(&buf, ",smp-cache.%zu.cache=%s", i, str);
+-            virBufferAsprintf(&buf, ",smp-cache.%zu.size=%llu", i,
+-                              cpu->cacheinfo[i].size);
++            str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].name);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.name=%s", i, str);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.location=%s", i,
++                              virCPUCacheLevelBindLocationTypeToString(cpu->cacheinfo[i].location));
++            virBufferAsprintf(&buf, ",smp-cache.%zu.size=%u", i, cpu->cacheinfo[i].size);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.sets=%u", i, cpu->cacheinfo[i].sets);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.associativity=%u", i, cpu->cacheinfo[i].associativity);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.line=%u", i, cpu->cacheinfo[i].line);
+         }
+     }
+ 
+-- 
+2.34.1
+

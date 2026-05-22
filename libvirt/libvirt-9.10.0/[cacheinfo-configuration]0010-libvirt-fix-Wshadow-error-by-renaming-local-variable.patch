@@ -1,0 +1,52 @@
+From d4a7f52499b22dbafe76c768e9cb4669d254a6f4 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Mon, 18 May 2026 11:28:22 +0800
+Subject: [PATCH 10/11]  libvirt: fix -Wshadow error by renaming local variable
+ "topology" to "cache_topology".
+
+---
+ src/conf/cpu_conf.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index 00fdc818a8..ee7fb73aa3 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -822,7 +822,7 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+     for (i = 0; i < n; i++) {
+         virCPUCacheLevelAndType cache_type;
+-        virCPUCacheTopologyLevel topology;
++        virCPUCacheTopologyLevel cache_topology;
+         char *tmp;
+         unsigned int size;
+         unsigned int sets;
+@@ -846,13 +846,13 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "topology");
+         if (tmp == NULL) {
+-            topology = virGetCacheInfoDefaultTopology(cache_type);
++            cache_topology = virGetCacheInfoDefaultTopology(cache_type);
+         }
+         else {
+-            topology = virCPUCacheTopologyLevelTypeFromString(tmp);
++            cache_topology = virCPUCacheTopologyLevelTypeFromString(tmp);
+         }
+         VIR_FREE(tmp);
+-        if (topology < 0) {
++        if (cache_topology < 0) {
+             virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                            _("Invalid cache topology level"));
+             return -1;
+@@ -911,7 +911,7 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+         def->cacheinfo[i].sets = sets;
+         def->cacheinfo[i].associativity = associativity;
+         def->cacheinfo[i].line = line;
+-        def->cacheinfo[i].topology = topology;
++        def->cacheinfo[i].topology = cache_topology;
+     }
+ 
+     if ((ncacheNodes = virXPathNodeSet("./cache", ctxt, &cacheNodes)) > 0) {
+-- 
+2.34.1
+

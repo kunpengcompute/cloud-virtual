@@ -1,0 +1,28 @@
+From 06061ce44c95635f2621b28c084ce6ca4ef86017 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Mon, 18 May 2026 15:17:28 +0800
+Subject: [PATCH 11/11]  libvirt: fix symbol sorting in libvirt_private.syms:
+ move virCPUCacheTopologyLevelTypeToString after virCPUCacheMode*.
+
+---
+ src/libvirt_private.syms | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/libvirt_private.syms b/src/libvirt_private.syms
+index ae76f22426..a454e4390a 100644
+--- a/src/libvirt_private.syms
++++ b/src/libvirt_private.syms
+@@ -95,9 +95,9 @@ virDomainCheckpointTypeToString;
+ # conf/cpu_conf.h
+ virCPUCacheLevelAndTypeTypeFromString;
+ virCPUCacheLevelAndTypeTypeToString;
+-virCPUCacheTopologyLevelTypeToString;
+ virCPUCacheModeTypeFromString;
+ virCPUCacheModeTypeToString;
++virCPUCacheTopologyLevelTypeToString;
+ virCPUDefAddFeature;
+ virCPUDefAddFeatureIfMissing;
+ virCPUDefCheckFeatures;
+-- 
+2.34.1
+

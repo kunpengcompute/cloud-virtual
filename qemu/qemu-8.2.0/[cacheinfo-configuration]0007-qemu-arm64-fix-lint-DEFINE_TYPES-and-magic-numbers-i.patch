@@ -1,0 +1,50 @@
+From 0e726b44ab1ebf7ae1c8fa080d93fb2e35ba0fff Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Tue, 12 May 2026 15:40:37 +0800
+Subject: [PATCH 07/12] qemu: arm64: fix lint DEFINE_TYPES and magic numbers in
+ UT
+
+---
+ tests/unit/test-smp-cache.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/tests/unit/test-smp-cache.c b/tests/unit/test-smp-cache.c
+index fa3aaddf12..da8fa2b806 100644
+--- a/tests/unit/test-smp-cache.c
++++ b/tests/unit/test-smp-cache.c
+@@ -17,6 +17,8 @@
+ 
+ #define SMP_CACHE_MACHINE_NAME "TEST-SMP-CACHE"
+ #define SMP_CACHE_MACHINE_TYPE MACHINE_TYPE_NAME("smp-cache-test")
++#define SMP_CACHE_MACHINE_MIN_CPUS 1
++#define SMP_CACHE_MACHINE_MAX_CPUS 4096
+ 
+ #define TEST_CACHE_LEVEL_COUNT  5
+ 
+@@ -316,8 +318,8 @@ static void smp_cache_machine_class_init(ObjectClass *oc, void *data)
+     MachineClass *mc = MACHINE_CLASS(oc);
+ 
+     mc->name = g_strdup(SMP_CACHE_MACHINE_NAME);
+-    mc->min_cpus = 1;
+-    mc->max_cpus = 4096;
++    mc->min_cpus = SMP_CACHE_MACHINE_MIN_CPUS;
++    mc->max_cpus = SMP_CACHE_MACHINE_MAX_CPUS;
+ }
+ 
+ static const TypeInfo smp_cache_machine_types[] = {
+@@ -335,10 +337,10 @@ static const TypeInfo smp_cache_machine_types[] = {
+     }
+ };
+ 
+-DEFINE_TYPES(smp_cache_machine_types)
+-
+ int main(int argc, char **argv)
+ {
++    type_register_static_array(smp_cache_machine_types,
++                               ARRAY_SIZE(smp_cache_machine_types));
+     module_call_init(MODULE_INIT_QOM);
+ 
+     g_test_init(&argc, &argv, NULL);
+-- 
+2.34.1
+
