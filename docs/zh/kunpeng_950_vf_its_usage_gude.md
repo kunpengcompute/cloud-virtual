@@ -78,7 +78,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 VF ITS补丁获取链接如下：
 
 ```text
-https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0/vf-its-patch
+https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0/VF_ITS
 ```
 
 需要获取以下两个补丁文件，并保持应用顺序不变：
