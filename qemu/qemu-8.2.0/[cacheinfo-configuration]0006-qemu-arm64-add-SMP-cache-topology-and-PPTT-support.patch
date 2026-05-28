@@ -1,0 +1,1055 @@
+From 733dec87fb0c66b1bbf627fc84566ea19c533667 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Tue, 12 May 2026 15:06:19 +0800
+Subject: [PATCH 06/12] qemu: arm64: add SMP cache topology and PPTT support
+
+---
+ hw/arm/virt-acpi-build.c    | 201 +++++++++++++----------
+ hw/arm/virt.c               |   7 +-
+ hw/core/machine-smp.c       |  15 +-
+ hw/core/machine.c           |  45 +-----
+ include/hw/boards.h         |   3 -
+ qapi/machine-common.json    |  28 +++-
+ qapi/machine.json           |  67 --------
+ tests/unit/test-smp-cache.c | 308 +++++++++++++++++++++++-------------
+ 8 files changed, 360 insertions(+), 314 deletions(-)
+
+diff --git a/hw/arm/virt-acpi-build.c b/hw/arm/virt-acpi-build.c
+index 6bd8d75c58..326e6935cd 100644
+--- a/hw/arm/virt-acpi-build.c
++++ b/hw/arm/virt-acpi-build.c
+@@ -75,23 +75,39 @@
+  * ACPI spec, Revision 6.3
+  * 5.2.29.1 Cache Type Structure (Type 1)
+  */
+-static void build_cache_hierarchy_node(GArray *tbl, uint32_t flags,
+-                                       uint32_t next_level, uint32_t size,
+-                                       uint32_t sets, uint8_t associativity,
+-                                       uint8_t attributes, uint16_t line_size,
++#define PPTT_TYPE_CACHE         1
++#define PPTT_CACHE_TYPE_LENGTH  28
++#define PPTT_CACHE_FIELD_WIDTH_4BYTE  4
++#define PPTT_CACHE_FIELD_WIDTH_2BYTE  2
++#define PPTT_CACHE_RESERVED     0
++#define CACHE_TYPE_SUFFIX_INDEX  2
++#define CACHE_LEVEL_NUM_INDEX        1
++#define PPTT_CACHE_NEXT_LEVEL_OFFSET 8
++
++struct CacheNodeProps {
++    uint32_t size;
++    uint32_t sets;
++    uint8_t  associativity;
++    uint8_t  attributes;
++    uint16_t line_size;
++    uint32_t flags;
++};
++
++static void build_cache_hierarchy_node(GArray *tbl, uint32_t next_level,
++                                       const struct CacheNodeProps *props,
+                                        uint32_t *id)
+ {
+-    build_append_byte(tbl, 1); /* Type 1 */
+-    build_append_byte(tbl, 28); /* Lenght */
+-    build_append_int_noprefix(tbl, 0, 2); /* Reserved */
+-    build_append_int_noprefix(tbl, flags, 4); /* Flags */
+-    build_append_int_noprefix(tbl, next_level, 4);  /* Next Level of Cache */
+-    build_append_int_noprefix(tbl, size, 4); /* Size */
+-    build_append_int_noprefix(tbl, sets, 4); /* Sets */
+-    build_append_byte(tbl, associativity); /* Associativity */
+-    build_append_byte(tbl, attributes); /* Attributes */
+-    build_append_int_noprefix(tbl, line_size, 2); /* Line Size */
+-    build_append_int_noprefix(tbl, (*id)++, 4); /* Cache ID */
++    build_append_byte(tbl, PPTT_TYPE_CACHE);
++    build_append_byte(tbl, PPTT_CACHE_TYPE_LENGTH);
++    build_append_int_noprefix(tbl, PPTT_CACHE_RESERVED, PPTT_CACHE_FIELD_WIDTH_2BYTE); /* Reserved */
++    build_append_int_noprefix(tbl, props->flags, PPTT_CACHE_FIELD_WIDTH_4BYTE); /* Flags */
++    build_append_int_noprefix(tbl, next_level, PPTT_CACHE_FIELD_WIDTH_4BYTE);  /* Next Level of Cache */
++    build_append_int_noprefix(tbl, props->size, PPTT_CACHE_FIELD_WIDTH_4BYTE); /* Size */
++    build_append_int_noprefix(tbl, props->sets, PPTT_CACHE_FIELD_WIDTH_4BYTE); /* Sets */
++    build_append_byte(tbl, props->associativity); /* Associativity */
++    build_append_byte(tbl, props->attributes); /* Attributes */
++    build_append_int_noprefix(tbl, props->line_size, PPTT_CACHE_FIELD_WIDTH_2BYTE); /* Line Size */
++    build_append_int_noprefix(tbl, (*id)++, PPTT_CACHE_FIELD_WIDTH_4BYTE); /* Cache ID */
+ }
+ 
+ struct cache_level_info {
+@@ -101,7 +117,62 @@ struct cache_level_info {
+     const char* level_name;
+ };
+ 
+-static struct cache_level_info* __make_cache_if_enable(GArray *table_data, uint32_t pptt_start, MachineState *ms, CacheBindProcessHierarchy bind, uint32_t *id)
++/*
++ * Patch the Next Level of Cache field for each cache node in the linked list.
++ * Finds the next node with level+1 and matching cache type, then writes its offset.
++ */
++static void update_cache_next_level(struct cache_level_info *head,
++                                    GArray *table_data, uint32_t pptt_start)
++{
++    struct cache_level_info *curr = head;
++    while (curr) {
++        struct cache_level_info *next = curr->next;
++        while (next) {
++            bool level_match = next->level == curr->level + 1;
++            bool type_match = next->level_name[CACHE_TYPE_SUFFIX_INDEX] == curr->level_name[CACHE_TYPE_SUFFIX_INDEX] ||
++                              next->level_name[CACHE_TYPE_SUFFIX_INDEX] == '\0';
++            if (level_match && type_match) {
++                *(uint32_t *)(table_data->data + pptt_start +
++                              curr->offset + PPTT_CACHE_NEXT_LEVEL_OFFSET) = next->offset;
++                break;
++            }
++            next = next->next;
++        }
++        curr = curr->next;
++    }
++}
++
++/*
++ * Insert a cache_level_info node into a sorted linked list by level (ascending).
++ * Returns the new head of the list.
++ */
++static struct cache_level_info *cache_level_info_insert(struct cache_level_info *head,
++                                                         struct cache_level_info *node)
++{
++    struct cache_level_info *prev = NULL;
++    struct cache_level_info *curr = head;
++
++    while (curr && curr->level < node->level) {
++        prev = curr;
++        curr = curr->next;
++    }
++
++    node->next = curr;
++    if (prev == NULL) {
++        return node;
++    }
++    prev->next = node;
++    return head;
++}
++
++struct PpttBuildCtx {
++    GArray *table_data;
++    uint32_t pptt_start;
++    MachineState *ms;
++    uint32_t cache_id;
++};
++
++static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCtx *ctx, CacheBindProcessHierarchy bind)
+ {
+     DECLARE_BITMAP(bind_mask, CACHE_BIND_PROCESS_HIERARCHY__MAX);
+     bitmap_zero(bind_mask, CACHE_BIND_PROCESS_HIERARCHY__MAX);
+@@ -115,75 +186,43 @@ static struct cache_level_info* __make_cache_if_enable(GArray *table_data, uint3
+     struct cache_level_info* head = NULL;
+ 
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        if (ms->smp_cache.props[i].location == bind && ms->smp_cache.props[i].size > 0) {
++        if (ctx->ms->smp_cache.props[i].location == bind && ctx->ms->smp_cache.props[i].size > 0) {
+             set_bit(i, bind_mask);
+ 
+             struct cache_level_info* node = malloc(sizeof(struct cache_level_info));
+-            node->offset = table_data->len - pptt_start;
+-            
+-            node->level_name = CacheLevelAndType_str(ms->smp_cache.props[i].name);
++            node->offset = ctx->table_data->len - ctx->pptt_start;
++            node->level_name = CacheLevelAndType_str(ctx->ms->smp_cache.props[i].cache);
+             node->level = atoi(node->level_name + 1); // level_name格式为L1D/L1I/L2/L3等，直接取数字部分
+-            node->next = NULL;
+ 
+-            if (head == NULL) {
+-                head = node;
+-            } else {
+-                struct cache_level_info* prev = NULL;
+-                struct cache_level_info* curr = head;
+-
+-                while (curr && curr->level < node->level) {
+-                    prev = curr;
+-                    curr = curr->next;
+-                }
+-
+-                if (prev == NULL) {
+-                    node->next = head;
+-                    head = node;
+-                } else {
+-                    prev->next = node;
+-                    node->next = curr;
+-                }
+-            }
++            head = cache_level_info_insert(head, node);
+ 
+-            uint8_t attributes = ((node->level_name[1] == '3') ? 0x2 : 0x0) | // L3 indicates Read and Write Allocate
+-                                 ((node->level_name[2] == 'i') ? 0x1 << 2 : 0x0) | // if instruction cache
+-                                 ((node->level_name[2] == '\0') ? 0x2 << 2 : 0x0); // if unified cache
+-
+-            build_cache_hierarchy_node(table_data,
+-                                       0xff, /* Flags */
+-                                       0, /* Next Level of Cache, to be updated by Guest linker at runtime */
+-                                       ms->smp_cache.props[i].size,
+-                                       ms->smp_cache.props[i].sets,
+-                                       ms->smp_cache.props[i].associativity,
+-                                       attributes, /* Attributes */
+-                                       ms->smp_cache.props[i].line,
+-                                       id);
+-        }
+-    }
++            uint8_t attributes = ((node->level_name[CACHE_LEVEL_NUM_INDEX] == '3') ? 0x2 : 0x0) | // L3 indicates Read and Write Allocate
++                                 ((node->level_name[CACHE_TYPE_SUFFIX_INDEX] == 'i') ? 0x1 << 2 : 0x0) | // if instruction cache
++                                 ((node->level_name[CACHE_TYPE_SUFFIX_INDEX] == '\0') ? 0x2 << 2 : 0x0); // if unified cache
+ 
+-    // 检查一遍设置next_level
+-    struct cache_level_info* curr = head;
+-    while (curr) {
+-        struct cache_level_info* next = curr->next;
+-        while (next) {
+-            if (next->level == curr->level + 1) {
+-                if (next->level_name[2] == curr->level_name[2] || next->level_name[2] == '\0') { 
+-                    *(uint32_t*)(table_data->data + pptt_start + curr->offset + 8) = next->offset; // next_level offset
+-                    break;
+-                }
+-            }
+-            next = next->next;
++            struct CacheNodeProps cprops = {
++                .size = ctx->ms->smp_cache.props[i].size,
++                .sets = ctx->ms->smp_cache.props[i].sets,
++                .associativity = ctx->ms->smp_cache.props[i].associativity,
++                .attributes = attributes,
++                .line_size = ctx->ms->smp_cache.props[i].line,
++                .flags = 0xff,
++            };
++            build_cache_hierarchy_node(ctx->table_data,
++                                       0, /* Next Level of Cache */
++                                       &cprops,
++                                       &ctx->cache_id);
+         }
+-        curr = curr->next;
+-            
+     }
+-    
++
++    update_cache_next_level(head, ctx->table_data, ctx->pptt_start);
++
+     return head;
+ }
+ 
+-static int make_cache_if_enable(GArray *table_data, uint32_t pptt_start, MachineState *ms, CacheBindProcessHierarchy bind, uint32_t *cache_buf, uint32_t *id)
++static int make_cache_if_enable(struct PpttBuildCtx *ctx, CacheBindProcessHierarchy bind, uint32_t *cache_buf)
+ {
+-    struct cache_level_info* head = __make_cache_if_enable(table_data, pptt_start, ms, bind, id);
++    struct cache_level_info* head = make_cache_if_enable_internal(ctx, bind);
+     struct cache_level_info* curr = head;
+     int cache_count = 0;
+     while (curr) {
+@@ -222,9 +261,14 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+                         .oem_id = oem_id, .oem_table_id = oem_table_id };
+ 
+     acpi_table_begin(&table, table_data);
++    struct PpttBuildCtx ctx = {
++        .table_data = table_data,
++        .pptt_start = pptt_start,
++        .ms = ms,
++        .cache_id = 0,
++    };
+     uint32_t cache_buf[CACHE_BIND_PROCESS_HIERARCHY__MAX];
+     int cache_count;
+-    uint32_t cache_id = 0;
+ 
+     /*
+      * This works with the assumption that cpus[n].props.*_id has been
+@@ -235,11 +279,10 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+     for (n = 0; n < cpus->len; n++) {
+ 
+         if (cpus->cpus[n].props.socket_id != socket_id) {
+-            assert(cpus->cpus[n].props.socket_id > socket_id);
+             socket_id = cpus->cpus[n].props.socket_id;
+             cluster_id = -1;
+             core_id = -1;
+-            cache_count = make_cache_if_enable(table_data, pptt_start, ms, CACHE_BIND_PROCESS_HIERARCHY_SOCKET, cache_buf, &cache_id);
++            cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_SOCKET, cache_buf);
+             socket_offset = table_data->len - pptt_start;
+             build_processor_hierarchy_node(table_data,
+                 (1 << 0), /* Physical package */
+@@ -248,10 +291,9 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+ 
+         if (mc->smp_props.clusters_supported && mc->smp_props.has_clusters) {
+             if (cpus->cpus[n].props.cluster_id != cluster_id) {
+-                assert(cpus->cpus[n].props.cluster_id > cluster_id);
+                 cluster_id = cpus->cpus[n].props.cluster_id;
+                 core_id = -1;
+-                cache_count = make_cache_if_enable(table_data, pptt_start, ms, CACHE_BIND_PROCESS_HIERARCHY_CLUSTER, cache_buf, &cache_id);
++                cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_CLUSTER, cache_buf);
+                 cluster_offset = table_data->len - pptt_start;
+                 build_processor_hierarchy_node(table_data,
+                     (0 << 0), /* Not a physical package */
+@@ -261,7 +303,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+             cluster_offset = socket_offset;
+         }
+ 
+-        cache_count = make_cache_if_enable(table_data, pptt_start, ms, CACHE_BIND_PROCESS_HIERARCHY_CORE, cache_buf, &cache_id);
++        cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_CORE, cache_buf);
+         if (ms->smp.threads == 1) {
+             build_processor_hierarchy_node(table_data,
+                 (1 << 1) | /* ACPI Processor ID valid */
+@@ -269,7 +311,6 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+                 cluster_offset, n, cache_buf, cache_count);
+         } else {
+             if (cpus->cpus[n].props.core_id != core_id) {
+-                assert(cpus->cpus[n].props.core_id > core_id);
+                 core_id = cpus->cpus[n].props.core_id;
+                 core_offset = table_data->len - pptt_start;
+                 build_processor_hierarchy_node(table_data,
+@@ -277,7 +318,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+                     cluster_offset, core_id, cache_buf, cache_count);
+             }
+ 
+-            cache_count = make_cache_if_enable(table_data, pptt_start, ms, CACHE_BIND_PROCESS_HIERARCHY_THREAD, cache_buf, &cache_id);
++            cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_THREAD, cache_buf);
+             build_processor_hierarchy_node(table_data,
+                 (1 << 1) | /* ACPI Processor ID valid */
+                 (1 << 2) | /* Processor is a Thread */
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index aabac2abd3..6b54a01735 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -139,6 +139,7 @@
+ #define NUM_IRQS 256
+ 
+ #define PLATFORM_BUS_NUM_IRQS 64
++#define CACHE_TYPE_SUFFIX_INDEX 2
+ 
+ /* Legacy RAM limit in GB (< version 4.0) */
+ #define LEGACY_RAMLIMIT_GB 255
+@@ -3739,7 +3740,7 @@ static uint64_t virt_get_vcpu_clidr(MachineState *ms)
+     DECLARE_BITMAP(level_mask, 8); /* clidr supports up to 8 cache levels */
+     bitmap_zero(level_mask, 8);
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        const char* name = CacheLevelAndType_str(ms->smp_cache.props[i].name);
++        const char* name = CacheLevelAndType_str(ms->smp_cache.props[i].cache);
+         uint32_t level = atoi(name + 1); /* name format is L1, L2, L3... */
+         if (ms->smp_cache.props[i].size == 0) {
+             continue;
+@@ -3750,9 +3751,9 @@ static uint64_t virt_get_vcpu_clidr(MachineState *ms)
+             ++loc;
+         }
+ 
+-        if (name[2] == 'i') {
++        if (name[CACHE_TYPE_SUFFIX_INDEX] == 'i') {
+             reg |= CTYPE_INS << CLIDR_CTYPE_SHIFT(level); /* instruction cache */
+-        } else if (name[2] == 'd') {
++        } else if (name[CACHE_TYPE_SUFFIX_INDEX] == 'd') {
+             reg |= CTYPE_DATA << CLIDR_CTYPE_SHIFT(level); /* data cache */
+         } else {
+             reg |= CTYPE_UNIFIED << CLIDR_CTYPE_SHIFT(level); /* unified cache */
+diff --git a/hw/core/machine-smp.c b/hw/core/machine-smp.c
+index f332bf2525..92116b4bb1 100644
+--- a/hw/core/machine-smp.c
++++ b/hw/core/machine-smp.c
+@@ -292,26 +292,25 @@ bool machine_parse_smp_cache(MachineState *ms,
+     bitmap_zero(caches_bitmap, CACHE_LEVEL_AND_TYPE__MAX);
+     for (node = caches; node; node = node->next) {
+         /* Prohibit users from repeating settings. */
+-        if (test_bit(node->value->name, caches_bitmap)) {
++        if (test_bit(node->value->cache, caches_bitmap)) {
+             error_setg(errp,
+                        "Invalid cache properties: %s. "
+                        "The cache properties are duplicated",
+-                       CacheLevelAndType_str(node->value->name));
++                       CacheLevelAndType_str(node->value->cache));
+             return false;
+         }
+ 
+         machine_set_cache_topo_level(ms, node->value->cache,
+                                      node->value->topology);
+         machine_set_cache_size(ms, node->value->cache,
+-        machine_set_cache_size(ms, node->value->name,
+                                node->value->size);
+-        set_bit(node->value->name, caches_bitmap);
++        set_bit(node->value->cache, caches_bitmap);
+ 
+         /* set all of the cacheinfo */
+-        ms->smp_cache.props[node->value->name].location = node->value->location;
+-        ms->smp_cache.props[node->value->name].sets = node->value->sets;
+-        ms->smp_cache.props[node->value->name].associativity = node->value->associativity;
+-        ms->smp_cache.props[node->value->name].line = node->value->line;
++        ms->smp_cache.props[node->value->cache].location = node->value->location;
++        ms->smp_cache.props[node->value->cache].sets = node->value->sets;
++        ms->smp_cache.props[node->value->cache].associativity = node->value->associativity;
++        ms->smp_cache.props[node->value->cache].line = node->value->line;
+     }
+ 
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index b2dc5073a5..83cd564065 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -918,6 +918,11 @@ static void machine_get_smp_cache(Object *obj, Visitor *v, const char *name,
+ 
+         node->cache = cache->props[i].cache;
+         node->topology = cache->props[i].topology;
++        node->location = cache->props[i].location;
++        node->size = cache->props[i].size;
++        node->sets = cache->props[i].sets;
++        node->associativity = cache->props[i].associativity;
++        node->line = cache->props[i].line;
+         QAPI_LIST_APPEND(tail, node);
+     }
+ 
+@@ -1007,44 +1012,6 @@ void machine_add_audiodev_property(MachineClass *mc)
+     object_class_property_set_description(oc, "audiodev",
+                                           "Audiodev to use for default machine devices");
+ }
+-static void machine_get_smp_cache(Object *obj, Visitor *v, const char *name,
+-                                  void *opaque, Error **errp)
+-{
+-    MachineState *ms = MACHINE(obj);
+-    SmpCache *cache = &ms->smp_cache;
+-    SmpCachePropertiesList *head = NULL;
+-    SmpCachePropertiesList **tail = &head;
+-
+-    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-
+-        node->name = cache->props[i].name;
+-        node->location = cache->props[i].location;
+-        node->size = cache->props[i].size;
+-        node->sets = cache->props[i].sets;
+-        node->associativity = cache->props[i].associativity;
+-        node->line = cache->props[i].line;
+-        QAPI_LIST_APPEND(tail, node);
+-    }
+-
+-    visit_type_SmpCachePropertiesList(v, name, &head, errp);
+-    qapi_free_SmpCachePropertiesList(head);
+-}
+-
+-static void machine_set_smp_cache(Object *obj, Visitor *v, const char *name,
+-                                  void *opaque, Error **errp)
+-{
+-    MachineState *ms = MACHINE(obj);
+-    SmpCachePropertiesList *caches;
+-
+-    if (!visit_type_SmpCachePropertiesList(v, name, &caches, errp)) {
+-        return;
+-    }
+-
+-    machine_parse_smp_cache(ms, caches, errp);
+-    qapi_free_SmpCachePropertiesList(caches);
+-}
+-
+ static void machine_class_init(ObjectClass *oc, void *data)
+ {
+     MachineClass *mc = MACHINE_CLASS(oc);
+@@ -1246,7 +1213,7 @@ static void machine_initfn(Object *obj)
+     machine_copy_boot_config(ms, &(BootConfiguration){ 0 });
+     
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        ms->smp_cache.props[i].name = (CacheLevelAndType)i;
++        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
+         ms->smp_cache.props[i].size = 0;
+     }
+ }
+diff --git a/include/hw/boards.h b/include/hw/boards.h
+index 14fec1a7ce..67d17e1331 100644
+--- a/include/hw/boards.h
++++ b/include/hw/boards.h
+@@ -47,9 +47,6 @@ void machine_set_cache_topo_level(MachineState *ms, CacheLevelAndType cache,
+                                   CpuTopologyLevel level);
+ bool machine_check_smp_cache(const MachineState *ms, Error **errp);
+ void machine_memory_devices_init(MachineState *ms, hwaddr base, uint64_t size);
+-bool machine_parse_smp_cache(MachineState *ms,
+-                             const SmpCachePropertiesList *caches,
+-                             Error **errp);
+ uint64_t machine_get_cache_size(const MachineState *ms,
+                                 CacheLevelAndType cache);
+ void machine_set_cache_size(MachineState *ms, CacheLevelAndType cache,
+diff --git a/qapi/machine-common.json b/qapi/machine-common.json
+index 2a56257933..7513bcd0ce 100644
+--- a/qapi/machine-common.json
++++ b/qapi/machine-common.json
+@@ -72,6 +72,8 @@
+ #
+ # @l1i: L1 instruction cache.
+ #
++# @l1: L1 (unified) cache.
++#
+ # @l2: L2 (unified) cache.
+ #
+ # @l3: L3 (unified) cache
+@@ -79,7 +81,16 @@
+ # Since: 9.2
+ ##
+ { 'enum': 'CacheLevelAndType',
+-  'data': [ 'l1d', 'l1i', 'l2', 'l3' ] }
++  'data': [ 'l1d', 'l1i', 'l1', 'l2', 'l3' ] }
++
++##
++# @CacheBindProcessHierarchy:
++# Cache binding process hierarchy, which is the granularity of
++#
++# Since: new
++##
++{ 'enum': 'CacheBindProcessHierarchy',
++'data': [ 'thread', 'core', 'cluster', 'die', 'socket' ] }
+ 
+ ##
+ # @SmpCacheProperties:
+@@ -93,12 +104,25 @@
+ #     enumeration as the parameter, i.e., CPUs in the same
+ #     topology container share the same cache.
+ #
++# @size: Cache size in units of Byte.
++#
++# @sets: Number of cache sets.
++#
++# @associativity: Cache associativity.
++#
++# @line: Cache line size in units of Byte.
++#
+ # Since: 9.2
+ ##
+ { 'struct': 'SmpCacheProperties',
+   'data': {
+   'cache': 'CacheLevelAndType',
+-  'topology': 'CpuTopologyLevel' } }
++  'topology': 'CpuTopologyLevel',
++  'location': 'CacheBindProcessHierarchy',
++  'size': 'uint64',
++  'sets': 'uint64',
++  'associativity': 'uint64',
++  'line': 'uint64' } }
+ 
+ ##
+ # @SmpCachePropertiesWrapper:
+diff --git a/qapi/machine.json b/qapi/machine.json
+index 38be3a386d..4f913f364a 100644
+--- a/qapi/machine.json
++++ b/qapi/machine.json
+@@ -1837,72 +1837,5 @@
+   'data': { 'filename': 'str' },
+   'if': 'CONFIG_FDT' }
+ 
+-##
+-# @CacheLevelAndType:
+-#
+-# Caches a system may have.  The enumeration value here is the
+-# combination of cache level and cache type.
+-#
+-# @l1d: L1 data cache.
+-#
+-# @l1i: L1 instruction cache.
+-#
+-# @l1: L1 (unified) cache.
+-#
+-# @l2: L2 (unified) cache.
+-#
+-# @l3: L3 (unified) cache
+-#
+-# Since: 6.2
+-##
+-{ 'enum': 'CacheLevelAndType',
+-  'data': [ 'l1d', 'l1i', 'l1', 'l2', 'l3' ] }
+ 
+-##
+-# @CacheBindProcessHierarchy:
+-# Cache binding process hierarchy, which is the granularity of
+-# 
+-# Since: new
+-##
+-{ 'enum': 'CacheBindProcessHierarchy',
+-  'data': [ 'thread', 'core', 'cluster', 'die', 'socket' ] }  
+ 
+-##
+-# @SmpCacheProperties:
+-#
+-# Cache information for SMP system.
+-#
+-# @name: Cache name, which is the combination of cache level and cache type.
+-#
+-# @size: Cache size in units of Byte.
+-#
+-# @location: Cache binding process hierarchy, which is the granularity of
+-#
+-# @sets: Number of cache sets.
+-#
+-# @associativity: Cache associativity.
+-#
+-# @line: Cache line size in units of Byte.
+-#
+-# Since: 9.2
+-##
+-{ 'struct': 'SmpCacheProperties',
+-  'data': {
+-  'name': 'CacheLevelAndType',
+-  'location': 'CacheBindProcessHierarchy',
+-  'size': 'uint64',
+-  'sets': 'uint64',
+-  'associativity': 'uint64',
+-  'line':  'uint64'} }
+-
+-##
+-# @SmpCachePropertiesWrapper:
+-#
+-# List wrapper of SmpCacheProperties.
+-#
+-# @caches: the list of SmpCacheProperties.
+-#
+-# Since 6.2
+-##
+-{ 'struct': 'SmpCachePropertiesWrapper',
+-  'data': { 'caches': ['SmpCacheProperties'] } }
+diff --git a/tests/unit/test-smp-cache.c b/tests/unit/test-smp-cache.c
+index 4edb1e2279..fa3aaddf12 100644
+--- a/tests/unit/test-smp-cache.c
++++ b/tests/unit/test-smp-cache.c
+@@ -15,37 +15,69 @@
+ 
+ #include "hw/boards.h"
+ 
++#define SMP_CACHE_MACHINE_NAME "TEST-SMP-CACHE"
++#define SMP_CACHE_MACHINE_TYPE MACHINE_TYPE_NAME("smp-cache-test")
++
++#define TEST_CACHE_LEVEL_COUNT  5
++
++/* L1D / L1I default test parameters */
++#define TEST_L1_CACHE_SIZE             32768
++#define TEST_L1_CACHE_SETS             32
++#define TEST_L1_CACHE_ASSOCIATIVITY    8
++#define TEST_L1_CACHE_LINE             64
++
++/* L2 test parameters */
++#define TEST_L2_CACHE_SIZE             262144
++#define TEST_L2_CACHE_SETS             256
++#define TEST_L2_CACHE_ASSOCIATIVITY    16
++
++/* Duplicate test: second L1D with different parameters */
++#define TEST_DUP_CACHE_SIZE            16384
++#define TEST_DUP_CACHE_SETS            16
++#define TEST_DUP_CACHE_ASSOCIATIVITY   4
++
++/* Cache size get/set test parameters */
++#define TEST_SET_L1D_CACHE_SIZE        65536
++#define TEST_SET_L2_CACHE_SIZE         524288
++
++/* All-levels test: base multiplier parameters */
++#define TEST_ALL_LEVELS_BASE_SETS      16
++#define TEST_ALL_LEVELS_BASE_ASSOC     2
++
+ /*
+  * Test case: valid single cache configuration
+  */
+ static void test_machine_parse_smp_cache_single_l1d(void)
+ {
+-    MachineState ms = {0};
++    Object *obj = object_new(SMP_CACHE_MACHINE_TYPE);
++    MachineState *ms = MACHINE(obj);
+     Error *errp = NULL;
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+-    
++
+     SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-    node->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node->cache = CACHE_LEVEL_AND_TYPE_L1D;
+     node->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
+-    node->size = 32768;
+-    node->sets = 32;
+-    node->associativity = 8;
+-    node->line = 64;
+-    
++    node->size = TEST_L1_CACHE_SIZE;
++    node->sets = TEST_L1_CACHE_SETS;
++    node->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
++    node->line = TEST_L1_CACHE_LINE;
++
+     QAPI_LIST_APPEND(tail, node);
+-    
+-    bool result = machine_parse_smp_cache(&ms, caches, &errp);
+-    
++
++    bool result = machine_parse_smp_cache(ms, caches, &errp);
++
+     g_assert_true(result);
+     g_assert_null(errp);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, 32768);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].sets, ==, 32);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].associativity, ==, 8);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].line, ==, 64);
+-    
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, TEST_L1_CACHE_SIZE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].sets, ==, TEST_L1_CACHE_SETS);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].associativity, ==, TEST_L1_CACHE_ASSOCIATIVITY);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].line, ==, TEST_L1_CACHE_LINE);
++
+     qapi_free_SmpCachePropertiesList(caches);
++    object_unref(obj);
+ }
+ 
+ /*
+@@ -53,59 +85,63 @@ static void test_machine_parse_smp_cache_single_l1d(void)
+  */
+ static void test_machine_parse_smp_cache_multiple(void)
+ {
+-    MachineState ms = {0};
++    Object *obj = object_new(SMP_CACHE_MACHINE_TYPE);
++    MachineState *ms = MACHINE(obj);
+     Error *errp = NULL;
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+-    
++
+     /* L1D cache */
+     SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
+-    node1->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node1->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node1->cache = CACHE_LEVEL_AND_TYPE_L1D;
+     node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
+-    node1->size = 32768;
+-    node1->sets = 32;
+-    node1->associativity = 8;
+-    node1->line = 64;
++    node1->size = TEST_L1_CACHE_SIZE;
++    node1->sets = TEST_L1_CACHE_SETS;
++    node1->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
++    node1->line = TEST_L1_CACHE_LINE;
+     QAPI_LIST_APPEND(tail, node1);
+-    
++
+     /* L1I cache */
+     SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
+-    node2->name = CACHE_LEVEL_AND_TYPE_L1I;
++    node2->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node2->cache = CACHE_LEVEL_AND_TYPE_L1I;
+     node2->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
+-    node2->size = 32768;
+-    node2->sets = 32;
+-    node2->associativity = 8;
+-    node2->line = 64;
++    node2->size = TEST_L1_CACHE_SIZE;
++    node2->sets = TEST_L1_CACHE_SETS;
++    node2->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
++    node2->line = TEST_L1_CACHE_LINE;
+     QAPI_LIST_APPEND(tail, node2);
+-    
++
+     /* L2 cache */
+     SmpCacheProperties *node3 = g_new(SmpCacheProperties, 1);
+-    node3->name = CACHE_LEVEL_AND_TYPE_L2;
++    node3->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node3->cache = CACHE_LEVEL_AND_TYPE_L2;
+     node3->location = CACHE_BIND_PROCESS_HIERARCHY_DIE;
+-    node3->size = 262144;
+-    node3->sets = 256;
+-    node3->associativity = 16;
+-    node3->line = 64;
++    node3->size = TEST_L2_CACHE_SIZE;
++    node3->sets = TEST_L2_CACHE_SETS;
++    node3->associativity = TEST_L2_CACHE_ASSOCIATIVITY;
++    node3->line = TEST_L1_CACHE_LINE;
+     QAPI_LIST_APPEND(tail, node3);
+-    
+-    bool result = machine_parse_smp_cache(&ms, caches, &errp);
+-    
++
++    bool result = machine_parse_smp_cache(ms, caches, &errp);
++
+     g_assert_true(result);
+     g_assert_null(errp);
+-    
++
+     /* Verify L1D */
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, 32768);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
+-    
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, TEST_L1_CACHE_SIZE);
++
+     /* Verify L1I */
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].size, ==, 32768);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
+-    
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].size, ==, TEST_L1_CACHE_SIZE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++
+     /* Verify L2 */
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].size, ==, 262144);
+-    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].location, ==, CACHE_BIND_PROCESS_HIERARCHY_DIE);
+-    
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].size, ==, TEST_L2_CACHE_SIZE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].location, ==, CACHE_BIND_PROCESS_HIERARCHY_DIE);
++
+     qapi_free_SmpCachePropertiesList(caches);
++    object_unref(obj);
+ }
+ 
+ /*
+@@ -113,37 +149,41 @@ static void test_machine_parse_smp_cache_multiple(void)
+  */
+ static void test_machine_parse_smp_cache_duplicate(void)
+ {
+-    MachineState ms = {0};
++    Object *obj = object_new(SMP_CACHE_MACHINE_TYPE);
++    MachineState *ms = MACHINE(obj);
+     Error *errp = NULL;
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+-    
++
+     /* Add L1D cache twice */
+     SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
+-    node1->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node1->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node1->cache = CACHE_LEVEL_AND_TYPE_L1D;
+     node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
+-    node1->size = 32768;
+-    node1->sets = 32;
+-    node1->associativity = 8;
+-    node1->line = 64;
++    node1->size = TEST_L1_CACHE_SIZE;
++    node1->sets = TEST_L1_CACHE_SETS;
++    node1->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
++    node1->line = TEST_L1_CACHE_LINE;
+     QAPI_LIST_APPEND(tail, node1);
+-    
++
+     SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
+-    node2->name = CACHE_LEVEL_AND_TYPE_L1D;  /* duplicate */
++    node2->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    node2->cache = CACHE_LEVEL_AND_TYPE_L1D;  /* duplicate */
+     node2->location = CACHE_BIND_PROCESS_HIERARCHY_THREAD;
+-    node2->size = 16384;
+-    node2->sets = 16;
+-    node2->associativity = 4;
+-    node2->line = 64;
++    node2->size = TEST_DUP_CACHE_SIZE;
++    node2->sets = TEST_DUP_CACHE_SETS;
++    node2->associativity = TEST_DUP_CACHE_ASSOCIATIVITY;
++    node2->line = TEST_L1_CACHE_LINE;
+     QAPI_LIST_APPEND(tail, node2);
+-    
+-    bool result = machine_parse_smp_cache(&ms, caches, &errp);
+-    
++
++    bool result = machine_parse_smp_cache(ms, caches, &errp);
++
+     g_assert_false(result);
+     g_assert_nonnull(errp);
+-    
++
+     error_free(errp);
+     qapi_free_SmpCachePropertiesList(caches);
++    object_unref(obj);
+ }
+ 
+ /*
+@@ -152,20 +192,20 @@ static void test_machine_parse_smp_cache_duplicate(void)
+ static void test_machine_cache_size_get_set(void)
+ {
+     MachineState ms = {0};
+-    
++
+     /* Initial size should be 0 */
+     g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 0);
+-    
++
+     /* Set cache size */
+-    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D, 65536);
+-    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 65536);
+-    
++    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D, TEST_SET_L1D_CACHE_SIZE);
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, TEST_SET_L1D_CACHE_SIZE);
++
+     /* Set another cache */
+-    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2, 524288);
+-    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2), ==, 524288);
+-    
++    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2, TEST_SET_L2_CACHE_SIZE);
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2), ==, TEST_SET_L2_CACHE_SIZE);
++
+     /* L1D should still be 65536 */
+-    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 65536);
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, TEST_SET_L1D_CACHE_SIZE);
+ }
+ 
+ /*
+@@ -173,11 +213,12 @@ static void test_machine_cache_size_get_set(void)
+  */
+ static void test_machine_parse_smp_cache_all_levels(void)
+ {
+-    MachineState ms = {0};
++    Object *obj = object_new(SMP_CACHE_MACHINE_TYPE);
++    MachineState *ms = MACHINE(obj);
+     Error *errp = NULL;
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+-    
++
+     /* Add all cache levels */
+     CacheLevelAndType levels[] = {
+         CACHE_LEVEL_AND_TYPE_L1D,
+@@ -186,31 +227,33 @@ static void test_machine_parse_smp_cache_all_levels(void)
+         CACHE_LEVEL_AND_TYPE_L2,
+         CACHE_LEVEL_AND_TYPE_L3
+     };
+-    
+-    for (int i = 0; i < 5; i++) {
++
++    for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
+         SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-        node->name = levels[i];
++        node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++        node->cache = levels[i];
+         node->location = CACHE_BIND_PROCESS_HIERARCHY_SOCKET;
+-        node->size = (i + 1) * 32768;
+-        node->sets = (i + 1) * 16;
+-        node->associativity = (i + 1) * 2;
+-        node->line = 64;
++        node->size = (i + 1) * TEST_L1_CACHE_SIZE;
++        node->sets = (i + 1) * TEST_ALL_LEVELS_BASE_SETS;
++        node->associativity = (i + 1) * TEST_ALL_LEVELS_BASE_ASSOC;
++        node->line = TEST_L1_CACHE_LINE;
+         QAPI_LIST_APPEND(tail, node);
+     }
+-    
+-    bool result = machine_parse_smp_cache(&ms, caches, &errp);
+-    
++
++    bool result = machine_parse_smp_cache(ms, caches, &errp);
++
+     g_assert_true(result);
+     g_assert_null(errp);
+-    
++
+     /* Verify all cache levels */
+-    for (int i = 0; i < 5; i++) {
+-        g_assert_cmpuint(ms.smp_cache.props[levels[i]].size, ==, (i + 1) * 32768);
+-        g_assert_cmpuint(ms.smp_cache.props[levels[i]].sets, ==, (i + 1) * 16);
+-        g_assert_cmpuint(ms.smp_cache.props[levels[i]].associativity, ==, (i + 1) * 2);
++    for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
++        g_assert_cmpuint(ms->smp_cache.props[levels[i]].size, ==, (i + 1) * TEST_L1_CACHE_SIZE);
++        g_assert_cmpuint(ms->smp_cache.props[levels[i]].sets, ==, (i + 1) * TEST_ALL_LEVELS_BASE_SETS);
++        g_assert_cmpuint(ms->smp_cache.props[levels[i]].associativity, ==, (i + 1) * TEST_ALL_LEVELS_BASE_ASSOC);
+     }
+-    
++
+     qapi_free_SmpCachePropertiesList(caches);
++    object_unref(obj);
+ }
+ 
+ /*
+@@ -218,11 +261,12 @@ static void test_machine_parse_smp_cache_all_levels(void)
+  */
+ static void test_machine_parse_smp_cache_bindings(void)
+ {
+-    MachineState ms = {0};
++    Object *obj = object_new(SMP_CACHE_MACHINE_TYPE);
++    MachineState *ms = MACHINE(obj);
+     Error *errp = NULL;
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+-    
++
+     CacheBindProcessHierarchy bindings[] = {
+         CACHE_BIND_PROCESS_HIERARCHY_THREAD,
+         CACHE_BIND_PROCESS_HIERARCHY_CORE,
+@@ -230,41 +274,81 @@ static void test_machine_parse_smp_cache_bindings(void)
+         CACHE_BIND_PROCESS_HIERARCHY_DIE,
+         CACHE_BIND_PROCESS_HIERARCHY_SOCKET
+     };
+-    
+-    for (int i = 0; i < 5; i++) {
++
++    for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
+         SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-        node->name = i;
++        node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++        node->cache = i;
+         node->location = bindings[i];
+-        node->size = 32768;
+-        node->sets = 32;
+-        node->associativity = 8;
+-        node->line = 64;
++        node->size = TEST_L1_CACHE_SIZE;
++        node->sets = TEST_L1_CACHE_SETS;
++        node->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
++        node->line = TEST_L1_CACHE_LINE;
+         QAPI_LIST_APPEND(tail, node);
+     }
+-    
+-    bool result = machine_parse_smp_cache(&ms, caches, &errp);
+-    
++
++    bool result = machine_parse_smp_cache(ms, caches, &errp);
++
+     g_assert_true(result);
+     g_assert_null(errp);
+-    
++
+     /* Verify all binding hierarchies */
+-    for (int i = 0; i < 5; i++) {
+-        g_assert_cmpuint(ms.smp_cache.props[i].location, ==, bindings[i]);
++    for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
++        g_assert_cmpuint(ms->smp_cache.props[i].location, ==, bindings[i]);
+     }
+-    
++
+     qapi_free_SmpCachePropertiesList(caches);
++    object_unref(obj);
+ }
+ 
++static void smp_cache_machine_init(Object *obj)
++{
++    MachineState *ms = MACHINE(obj);
++
++    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
++        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
++        ms->smp_cache.props[i].topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++    }
++}
++
++static void smp_cache_machine_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->name = g_strdup(SMP_CACHE_MACHINE_NAME);
++    mc->min_cpus = 1;
++    mc->max_cpus = 4096;
++}
++
++static const TypeInfo smp_cache_machine_types[] = {
++    {
++        .name           = TYPE_MACHINE,
++        .parent         = TYPE_OBJECT,
++        .abstract       = true,
++        .class_size     = sizeof(MachineClass),
++        .instance_size  = sizeof(MachineState),
++    }, {
++        .name           = SMP_CACHE_MACHINE_TYPE,
++        .parent         = TYPE_MACHINE,
++        .class_init     = smp_cache_machine_class_init,
++        .instance_init  = smp_cache_machine_init,
++    }
++};
++
++DEFINE_TYPES(smp_cache_machine_types)
++
+ int main(int argc, char **argv)
+ {
++    module_call_init(MODULE_INIT_QOM);
++
+     g_test_init(&argc, &argv, NULL);
+-    
++
+     g_test_add_func("/smp-cache/parse_single_l1d", test_machine_parse_smp_cache_single_l1d);
+     g_test_add_func("/smp-cache/parse_multiple", test_machine_parse_smp_cache_multiple);
+     g_test_add_func("/smp-cache/parse_duplicate", test_machine_parse_smp_cache_duplicate);
+     g_test_add_func("/smp-cache/cache_size_get_set", test_machine_cache_size_get_set);
+     g_test_add_func("/smp-cache/parse_all_levels", test_machine_parse_smp_cache_all_levels);
+     g_test_add_func("/smp-cache/parse_bindings", test_machine_parse_smp_cache_bindings);
+-    
++
+     return g_test_run();
+-}
+\ No newline at end of file
++}
+-- 
+2.34.1
+

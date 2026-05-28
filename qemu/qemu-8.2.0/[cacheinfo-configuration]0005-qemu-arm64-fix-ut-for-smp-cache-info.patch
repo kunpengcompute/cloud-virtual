@@ -1,0 +1,54 @@
+From 3918b5de538c142fd3d70c2ff61a2f3adaf6cfd2 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Mon, 11 May 2026 10:45:57 +0800
+Subject: [PATCH 05/12] qemu: arm64: fix ut for smp cache info
+
+---
+ tests/data/acpi/virt/PPTT              | Bin 208 -> 76 bytes
+ tests/data/acpi/virt/PPTT.acpihmatvirt | Bin 588 -> 156 bytes
+ tests/data/acpi/virt/PPTT.topology     | Bin 700 -> 336 bytes
+ 3 files changed, 0 insertions(+), 0 deletions(-)
+
+diff --git a/tests/data/acpi/virt/PPTT b/tests/data/acpi/virt/PPTT
+index b89b2a9c71e0bc2713fc38f5de68fbc39b6302cb..ae1a078b286e6a2983abe7b11747e66bfe5e04a7 100644
+GIT binary patch
+literal 76
+zcmWFt2nq3FU|?Wg?&R<65v<@85#X!<1dKp25F11@h%hjKX%HI*fMQ%gwhD|7qyeJ?
+B2LS*8
+
+literal 208
+zcmWFt2no5sz`($y>E!S15v<@85#X!<1dKp25F11@N-!|g18FE=V&Gt4;OA;!U;v7P
+z<Y55BRsnHDAR;yp3QVG!0W^Sxfq{d|0d95%L>1UT7A73xEDj6|3JeTfK(!%23<AtR
+M4AR>G#4~^x046;S0RR91
+
+diff --git a/tests/data/acpi/virt/PPTT.acpihmatvirt b/tests/data/acpi/virt/PPTT.acpihmatvirt
+index 945a73fff3b5c93367999199f06dbe7294f594b4..4e49ff8f997bc0ecbb122c55d4e6ecc555b8e739 100644
+GIT binary patch
+literal 156
+zcmWFt2nm_Pz`(%#*U8`6BUr&HBEVSz2pEB4AU23*5Mf{d(;zks0L8d~Y!w(EL?em8
+b)g$Re76a)`0AeN}1_P+x1R#eQBEkRwWKIbI
+
+literal 588
+zcma)(F%E)26hw!Wg3#DdSW;Me1PcNd7A9^Yg-5XP2qs#11Pc$rF+7H)$FOh)(6Ac`
+z{4l$lVg7$hu(m8W1~7+wTda3!zPCln3IOP=J(vM!?rj-Fz%;%9^!5H*I?t&w`Fbw1
+zrJ55hz_Qtzwe^l2&z;Llgg_K$KVDU5Ihjvrdi*d0QXppbN~tE4dLPu28sa3nydWOO
+w@jZ@O#8GBJt*9Z+Nlkw^j^E+jndYyoIm+CqY6R!i!*P6%qi>Ovc~c3&AN*}20RR91
+
+diff --git a/tests/data/acpi/virt/PPTT.topology b/tests/data/acpi/virt/PPTT.topology
+index b0762c0a73eab106bab475f2a177e159b0b01c67..9ad5a99364e74f1258686fed481aaeee0d5dea94 100644
+GIT binary patch
+literal 336
+zcmWFt2nh*bWME*fcJg=j2v%^42yj*a0-z8Bhz+6{L>L&rG>8oYKrs+dflv?<DrSKu
+z#s}p4;1GkGi=-D>45YUMh?!vef$Csl%t&G&Cde(wdO>1GKm-gx_1*yTS+Iz)B8h>R
+aAic=uf$S9l3b27BK>%tVNQ@mK!T<mOeGUNt
+
+literal 700
+zcmaiyI}XAy5JZPyKB9mo1!W3KjzEE+p+F)MDL4QHhd_cu<QSBcl$0DJ$4J49^O2nd
+zvGQh}msyV-JC2j&6#zlJIc#^wXmg6U5u*n{bJgA)xUrTIU<}MAcYs{qtI&L*m#`qK
+zq7+YuRXzT?T+{&L$-4Ht+D@uDOz?x7H4s@LlA@r`s@|0OVE*&TsIevuACEVDD78M)
+z<jj!ZpU+-R+6;%gACEge7s(mgk2GiIRqft+wEx?anl2xYH+<A0A89_!On_%LWqC8}
+haF`@EO1326RcbM<YopYq)R_)8Xt12RVFw$P><ca=C;<Qf
+
+-- 
+2.34.1
+

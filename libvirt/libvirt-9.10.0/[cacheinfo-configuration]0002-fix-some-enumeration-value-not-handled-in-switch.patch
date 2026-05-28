@@ -1,0 +1,88 @@
+From cb9a90f9f445cde3f964e6b205b9eb4116479905 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt11@noreply.gitcode.com>
+Date: Thu, 23 Apr 2026 19:01:41 +0800
+Subject: [PATCH 02/11] fix some enumeration value not handled in switch.
+
+---
+ src/conf/cpu_conf.c      | 1 +
+ src/lxc/lxc_controller.c | 2 ++
+ src/lxc/lxc_driver.c     | 4 ++++
+ src/lxc/lxc_hostdev.c    | 2 ++
+ src/vbox/vbox_common.c   | 1 +
+ 5 files changed, 10 insertions(+)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index ea5f9c14b8..ad04f530f8 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -27,6 +27,7 @@
+ #include "virfile.h"
+ #include "cpu_conf.h"
+ #include "virlog.h"
++#include "virstring.h"
+ 
+ #define VIR_FROM_THIS VIR_FROM_CPU
+ 
+diff --git a/src/lxc/lxc_controller.c b/src/lxc/lxc_controller.c
+index 48f5c73fce..fba2c11e39 100644
+--- a/src/lxc/lxc_controller.c
++++ b/src/lxc/lxc_controller.c
+@@ -1781,6 +1781,8 @@ virLXCControllerSetupHostdevSubsys(virDomainDef *vmDef,
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_SCSI_HOST:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_MDEV:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_LAST:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_VDPA:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_UB:
+     default:
+         virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
+                        _("Unsupported host device mode %1$s"),
+diff --git a/src/lxc/lxc_driver.c b/src/lxc/lxc_driver.c
+index 94d1f726f6..f1d78d660a 100644
+--- a/src/lxc/lxc_driver.c
++++ b/src/lxc/lxc_driver.c
+@@ -3865,6 +3865,8 @@ lxcDomainAttachDeviceHostdevSubsysLive(virLXCDriver *driver,
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_SCSI_HOST:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_MDEV:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_LAST:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_VDPA:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_UB:
+     default:
+         virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
+                        _("Unsupported host device type %1$s"),
+@@ -4303,6 +4305,8 @@ lxcDomainDetachDeviceHostdevSubsysLive(virLXCDriver *driver,
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_SCSI_HOST:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_MDEV:
+     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_LAST:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_VDPA:
++    case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_UB:
+     default:
+         virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
+                        _("Unsupported host device type %1$s"),
+diff --git a/src/lxc/lxc_hostdev.c b/src/lxc/lxc_hostdev.c
+index 0c4f0b8cac..f97d31cded 100644
+--- a/src/lxc/lxc_hostdev.c
++++ b/src/lxc/lxc_hostdev.c
+@@ -80,6 +80,8 @@ int virLXCPrepareHostDevices(virLXCDriver *driver,
+             case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_SCSI:
+             case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_SCSI_HOST:
+             case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_MDEV:
++            case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_VDPA:
++            case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_UB:
+             case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_LAST:
+             default:
+                 virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
+diff --git a/src/vbox/vbox_common.c b/src/vbox/vbox_common.c
+index de3c9989a5..58e0df6516 100644
+--- a/src/vbox/vbox_common.c
++++ b/src/vbox/vbox_common.c
+@@ -495,6 +495,7 @@ vboxSetStorageController(virDomainControllerDef *controller,
+     case VIR_DOMAIN_CONTROLLER_TYPE_XENBUS:
+     case VIR_DOMAIN_CONTROLLER_TYPE_ISA:
+     case VIR_DOMAIN_CONTROLLER_TYPE_LAST:
++    case VIR_DOMAIN_CONTROLLER_TYPE_UB:
+         vboxReportError(VIR_ERR_CONFIG_UNSUPPORTED,
+                         _("The vbox driver does not support %1$s controller type"),
+                         virDomainControllerTypeToString(controller->type));
+-- 
+2.34.1
+

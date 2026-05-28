@@ -1,0 +1,319 @@
+From 8302471bea85aad9d7d2870c0573e98c1e840b95 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Fri, 15 May 2026 14:09:54 +0800
+Subject: [PATCH 09/12] qemu: arm64: remove CacheBindProcessHierarchy enum and
+ location field, unify to CpuTopologyLevel topology
+
+---
+ hw/arm/virt-acpi-build.c    | 20 +++++++-------
+ hw/core/machine-smp.c       |  1 -
+ hw/core/machine.c           |  1 -
+ qapi/machine-common.json    | 10 -------
+ tests/unit/test-smp-cache.c | 55 ++++++++++++++++++-------------------
+ 5 files changed, 37 insertions(+), 50 deletions(-)
+
+diff --git a/hw/arm/virt-acpi-build.c b/hw/arm/virt-acpi-build.c
+index 326e6935cd..2f1c9ef3b8 100644
+--- a/hw/arm/virt-acpi-build.c
++++ b/hw/arm/virt-acpi-build.c
+@@ -172,10 +172,10 @@ struct PpttBuildCtx {
+     uint32_t cache_id;
+ };
+ 
+-static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCtx *ctx, CacheBindProcessHierarchy bind)
++static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCtx *ctx, CpuTopologyLevel bind)
+ {
+-    DECLARE_BITMAP(bind_mask, CACHE_BIND_PROCESS_HIERARCHY__MAX);
+-    bitmap_zero(bind_mask, CACHE_BIND_PROCESS_HIERARCHY__MAX);
++    DECLARE_BITMAP(bind_mask, CPU_TOPOLOGY_LEVEL__MAX);
++    bitmap_zero(bind_mask, CPU_TOPOLOGY_LEVEL__MAX);
+ 
+     /*
+      * cache_level_info记录offset和level，
+@@ -186,7 +186,7 @@ static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCt
+     struct cache_level_info* head = NULL;
+ 
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        if (ctx->ms->smp_cache.props[i].location == bind && ctx->ms->smp_cache.props[i].size > 0) {
++        if (ctx->ms->smp_cache.props[i].topology == bind && ctx->ms->smp_cache.props[i].size > 0) {
+             set_bit(i, bind_mask);
+ 
+             struct cache_level_info* node = malloc(sizeof(struct cache_level_info));
+@@ -220,7 +220,7 @@ static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCt
+     return head;
+ }
+ 
+-static int make_cache_if_enable(struct PpttBuildCtx *ctx, CacheBindProcessHierarchy bind, uint32_t *cache_buf)
++static int make_cache_if_enable(struct PpttBuildCtx *ctx, CpuTopologyLevel bind, uint32_t *cache_buf)
+ {
+     struct cache_level_info* head = make_cache_if_enable_internal(ctx, bind);
+     struct cache_level_info* curr = head;
+@@ -267,7 +267,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+         .ms = ms,
+         .cache_id = 0,
+     };
+-    uint32_t cache_buf[CACHE_BIND_PROCESS_HIERARCHY__MAX];
++    uint32_t cache_buf[CPU_TOPOLOGY_LEVEL__MAX];
+     int cache_count;
+ 
+     /*
+@@ -282,7 +282,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+             socket_id = cpus->cpus[n].props.socket_id;
+             cluster_id = -1;
+             core_id = -1;
+-            cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_SOCKET, cache_buf);
++            cache_count = make_cache_if_enable(&ctx, CPU_TOPOLOGY_LEVEL_SOCKET, cache_buf);
+             socket_offset = table_data->len - pptt_start;
+             build_processor_hierarchy_node(table_data,
+                 (1 << 0), /* Physical package */
+@@ -293,7 +293,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+             if (cpus->cpus[n].props.cluster_id != cluster_id) {
+                 cluster_id = cpus->cpus[n].props.cluster_id;
+                 core_id = -1;
+-                cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_CLUSTER, cache_buf);
++                cache_count = make_cache_if_enable(&ctx, CPU_TOPOLOGY_LEVEL_CLUSTER, cache_buf);
+                 cluster_offset = table_data->len - pptt_start;
+                 build_processor_hierarchy_node(table_data,
+                     (0 << 0), /* Not a physical package */
+@@ -303,7 +303,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+             cluster_offset = socket_offset;
+         }
+ 
+-        cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_CORE, cache_buf);
++        cache_count = make_cache_if_enable(&ctx, CPU_TOPOLOGY_LEVEL_CORE, cache_buf);
+         if (ms->smp.threads == 1) {
+             build_processor_hierarchy_node(table_data,
+                 (1 << 1) | /* ACPI Processor ID valid */
+@@ -318,7 +318,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+                     cluster_offset, core_id, cache_buf, cache_count);
+             }
+ 
+-            cache_count = make_cache_if_enable(&ctx, CACHE_BIND_PROCESS_HIERARCHY_THREAD, cache_buf);
++            cache_count = make_cache_if_enable(&ctx, CPU_TOPOLOGY_LEVEL_THREAD, cache_buf);
+             build_processor_hierarchy_node(table_data,
+                 (1 << 1) | /* ACPI Processor ID valid */
+                 (1 << 2) | /* Processor is a Thread */
+diff --git a/hw/core/machine-smp.c b/hw/core/machine-smp.c
+index 92116b4bb1..5b5607a54e 100644
+--- a/hw/core/machine-smp.c
++++ b/hw/core/machine-smp.c
+@@ -307,7 +307,6 @@ bool machine_parse_smp_cache(MachineState *ms,
+         set_bit(node->value->cache, caches_bitmap);
+ 
+         /* set all of the cacheinfo */
+-        ms->smp_cache.props[node->value->cache].location = node->value->location;
+         ms->smp_cache.props[node->value->cache].sets = node->value->sets;
+         ms->smp_cache.props[node->value->cache].associativity = node->value->associativity;
+         ms->smp_cache.props[node->value->cache].line = node->value->line;
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index 737cd8f8b4..84aa4ca5c2 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -918,7 +918,6 @@ static void machine_get_smp_cache(Object *obj, Visitor *v, const char *name,
+ 
+         node->cache = cache->props[i].cache;
+         node->topology = cache->props[i].topology;
+-        node->location = cache->props[i].location;
+         node->size = cache->props[i].size;
+         node->sets = cache->props[i].sets;
+         node->associativity = cache->props[i].associativity;
+diff --git a/qapi/machine-common.json b/qapi/machine-common.json
+index 7513bcd0ce..308c6921fa 100644
+--- a/qapi/machine-common.json
++++ b/qapi/machine-common.json
+@@ -83,15 +83,6 @@
+ { 'enum': 'CacheLevelAndType',
+   'data': [ 'l1d', 'l1i', 'l1', 'l2', 'l3' ] }
+ 
+-##
+-# @CacheBindProcessHierarchy:
+-# Cache binding process hierarchy, which is the granularity of
+-#
+-# Since: new
+-##
+-{ 'enum': 'CacheBindProcessHierarchy',
+-'data': [ 'thread', 'core', 'cluster', 'die', 'socket' ] }
+-
+ ##
+ # @SmpCacheProperties:
+ #
+@@ -118,7 +109,6 @@
+   'data': {
+   'cache': 'CacheLevelAndType',
+   'topology': 'CpuTopologyLevel',
+-  'location': 'CacheBindProcessHierarchy',
+   'size': 'uint64',
+   'sets': 'uint64',
+   'associativity': 'uint64',
+diff --git a/tests/unit/test-smp-cache.c b/tests/unit/test-smp-cache.c
+index 3a8ce26e62..bf1018c88c 100644
+--- a/tests/unit/test-smp-cache.c
++++ b/tests/unit/test-smp-cache.c
+@@ -58,9 +58,8 @@ static void test_machine_parse_smp_cache_single_l1d(void)
+     SmpCachePropertiesList **tail = &caches;
+ 
+     SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-    node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node->cache = CACHE_LEVEL_AND_TYPE_L1D;
+-    node->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node->topology = CPU_TOPOLOGY_LEVEL_CORE;
+     node->size = TEST_L1_CACHE_SIZE;
+     node->sets = TEST_L1_CACHE_SETS;
+     node->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
+@@ -73,7 +72,7 @@ static void test_machine_parse_smp_cache_single_l1d(void)
+     g_assert_true(result);
+     g_assert_null(errp);
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, TEST_L1_CACHE_SIZE);
+-    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].topology, ==, CPU_TOPOLOGY_LEVEL_CORE);
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].sets, ==, TEST_L1_CACHE_SETS);
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].associativity, ==, TEST_L1_CACHE_ASSOCIATIVITY);
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].line, ==, TEST_L1_CACHE_LINE);
+@@ -95,9 +94,8 @@ static void test_machine_parse_smp_cache_multiple(void)
+ 
+     /* L1D cache */
+     SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
+-    node1->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node1->cache = CACHE_LEVEL_AND_TYPE_L1D;
+-    node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node1->topology = CPU_TOPOLOGY_LEVEL_CORE;
+     node1->size = TEST_L1_CACHE_SIZE;
+     node1->sets = TEST_L1_CACHE_SETS;
+     node1->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
+@@ -106,9 +104,8 @@ static void test_machine_parse_smp_cache_multiple(void)
+ 
+     /* L1I cache */
+     SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
+-    node2->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node2->cache = CACHE_LEVEL_AND_TYPE_L1I;
+-    node2->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node2->topology = CPU_TOPOLOGY_LEVEL_CORE;
+     node2->size = TEST_L1_CACHE_SIZE;
+     node2->sets = TEST_L1_CACHE_SETS;
+     node2->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
+@@ -117,9 +114,8 @@ static void test_machine_parse_smp_cache_multiple(void)
+ 
+     /* L2 cache */
+     SmpCacheProperties *node3 = g_new(SmpCacheProperties, 1);
+-    node3->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node3->cache = CACHE_LEVEL_AND_TYPE_L2;
+-    node3->location = CACHE_BIND_PROCESS_HIERARCHY_DIE;
++    node3->topology = CPU_TOPOLOGY_LEVEL_DIE;
+     node3->size = TEST_L2_CACHE_SIZE;
+     node3->sets = TEST_L2_CACHE_SETS;
+     node3->associativity = TEST_L2_CACHE_ASSOCIATIVITY;
+@@ -136,11 +132,11 @@ static void test_machine_parse_smp_cache_multiple(void)
+ 
+     /* Verify L1I */
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].size, ==, TEST_L1_CACHE_SIZE);
+-    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].topology, ==, CPU_TOPOLOGY_LEVEL_CORE);
+ 
+     /* Verify L2 */
+     g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].size, ==, TEST_L2_CACHE_SIZE);
+-    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].location, ==, CACHE_BIND_PROCESS_HIERARCHY_DIE);
++    g_assert_cmpuint(ms->smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].topology, ==, CPU_TOPOLOGY_LEVEL_DIE);
+ 
+     qapi_free_SmpCachePropertiesList(caches);
+     object_unref(obj);
+@@ -159,9 +155,8 @@ static void test_machine_parse_smp_cache_duplicate(void)
+ 
+     /* Add L1D cache twice */
+     SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
+-    node1->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node1->cache = CACHE_LEVEL_AND_TYPE_L1D;
+-    node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node1->topology = CPU_TOPOLOGY_LEVEL_CORE;
+     node1->size = TEST_L1_CACHE_SIZE;
+     node1->sets = TEST_L1_CACHE_SETS;
+     node1->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
+@@ -169,9 +164,8 @@ static void test_machine_parse_smp_cache_duplicate(void)
+     QAPI_LIST_APPEND(tail, node1);
+ 
+     SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
+-    node2->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+     node2->cache = CACHE_LEVEL_AND_TYPE_L1D;  /* duplicate */
+-    node2->location = CACHE_BIND_PROCESS_HIERARCHY_THREAD;
++    node2->topology = CPU_TOPOLOGY_LEVEL_THREAD;
+     node2->size = TEST_DUP_CACHE_SIZE;
+     node2->sets = TEST_DUP_CACHE_SETS;
+     node2->associativity = TEST_DUP_CACHE_ASSOCIATIVITY;
+@@ -232,9 +226,8 @@ static void test_machine_parse_smp_cache_all_levels(void)
+ 
+     for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
+         SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-        node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+         node->cache = levels[i];
+-        node->location = CACHE_BIND_PROCESS_HIERARCHY_SOCKET;
++        node->topology = CPU_TOPOLOGY_LEVEL_SOCKET;
+         node->size = (i + 1) * TEST_L1_CACHE_SIZE;
+         node->sets = (i + 1) * TEST_ALL_LEVELS_BASE_SETS;
+         node->associativity = (i + 1) * TEST_ALL_LEVELS_BASE_ASSOC;
+@@ -259,7 +252,7 @@ static void test_machine_parse_smp_cache_all_levels(void)
+ }
+ 
+ /*
+- * Test case: different binding process hierarchies
++ * Test case: different topology levels
+  */
+ static void test_machine_parse_smp_cache_bindings(void)
+ {
+@@ -269,19 +262,18 @@ static void test_machine_parse_smp_cache_bindings(void)
+     SmpCachePropertiesList *caches = NULL;
+     SmpCachePropertiesList **tail = &caches;
+ 
+-    CacheBindProcessHierarchy bindings[] = {
+-        CACHE_BIND_PROCESS_HIERARCHY_THREAD,
+-        CACHE_BIND_PROCESS_HIERARCHY_CORE,
+-        CACHE_BIND_PROCESS_HIERARCHY_CLUSTER,
+-        CACHE_BIND_PROCESS_HIERARCHY_DIE,
+-        CACHE_BIND_PROCESS_HIERARCHY_SOCKET
++    CpuTopologyLevel bindings[] = {
++        CPU_TOPOLOGY_LEVEL_MODULE,
++        CPU_TOPOLOGY_LEVEL_CORE,
++        CPU_TOPOLOGY_LEVEL_CLUSTER,
++        CPU_TOPOLOGY_LEVEL_DIE,
++        CPU_TOPOLOGY_LEVEL_SOCKET
+     };
+ 
+     for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
+         SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
+-        node->topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+         node->cache = i;
+-        node->location = bindings[i];
++        node->topology = bindings[i];
+         node->size = TEST_L1_CACHE_SIZE;
+         node->sets = TEST_L1_CACHE_SETS;
+         node->associativity = TEST_L1_CACHE_ASSOCIATIVITY;
+@@ -294,9 +286,9 @@ static void test_machine_parse_smp_cache_bindings(void)
+     g_assert_true(result);
+     g_assert_null(errp);
+ 
+-    /* Verify all binding hierarchies */
++    /* Verify all topology levels */
+     for (int i = 0; i < TEST_CACHE_LEVEL_COUNT; i++) {
+-        g_assert_cmpuint(ms->smp_cache.props[i].location, ==, bindings[i]);
++        g_assert_cmpuint(ms->smp_cache.props[i].topology, ==, bindings[i]);
+     }
+ 
+     qapi_free_SmpCachePropertiesList(caches);
+@@ -312,9 +304,16 @@ static void smp_cache_machine_init(Object *obj)
+     mc->min_cpus = SMP_CACHE_MACHINE_MIN_CPUS;
+     mc->max_cpus = SMP_CACHE_MACHINE_MAX_CPUS;
+ 
++    mc->smp_props.dies_supported = true;
++    mc->smp_props.clusters_supported = true;
++    mc->smp_props.modules_supported = true;
++    mc->smp_props.books_supported = true;
++    mc->smp_props.drawers_supported = true;
++
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+         ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
+         ms->smp_cache.props[i].topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++        mc->smp_props.cache_supported[i] = true;
+     }
+ }
+ 
+-- 
+2.34.1
+

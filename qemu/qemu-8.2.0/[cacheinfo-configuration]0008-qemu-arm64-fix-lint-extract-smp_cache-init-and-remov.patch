@@ -1,0 +1,93 @@
+From 231d9ea47a5f9dcfc664a7f806c0e902e3c8f483 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Tue, 12 May 2026 20:00:30 +0800
+Subject: [PATCH 08/12] qemu: arm64: fix lint: extract smp_cache init and
+ remove void* param
+
+---
+ hw/core/machine.c           | 19 ++++++++++---------
+ tests/unit/test-smp-cache.c | 15 +++++----------
+ 2 files changed, 15 insertions(+), 19 deletions(-)
+
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index 83cd564065..737cd8f8b4 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -1152,6 +1152,15 @@ static void machine_class_base_init(ObjectClass *oc, void *data)
+     }
+ }
+ 
++static void machine_init_smp_cache(MachineState *ms)
++{
++    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
++        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
++        ms->smp_cache.props[i].topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
++        ms->smp_cache.props[i].size = 0;
++    }
++}
++
+ static void machine_initfn(Object *obj)
+ {
+     MachineState *ms = MACHINE(obj);
+@@ -1205,17 +1214,9 @@ static void machine_initfn(Object *obj)
+     ms->smp.cores = 1;
+     ms->smp.threads = 1;
+ 
+-    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
+-        ms->smp_cache.props[i].topology = CPU_TOPOLOGY_LEVEL_DEFAULT;
+-    }
++    machine_init_smp_cache(ms);
+ 
+     machine_copy_boot_config(ms, &(BootConfiguration){ 0 });
+-    
+-    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+-        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
+-        ms->smp_cache.props[i].size = 0;
+-    }
+ }
+ 
+ static void machine_finalize(Object *obj)
+diff --git a/tests/unit/test-smp-cache.c b/tests/unit/test-smp-cache.c
+index da8fa2b806..3a8ce26e62 100644
+--- a/tests/unit/test-smp-cache.c
++++ b/tests/unit/test-smp-cache.c
+@@ -306,6 +306,11 @@ static void test_machine_parse_smp_cache_bindings(void)
+ static void smp_cache_machine_init(Object *obj)
+ {
+     MachineState *ms = MACHINE(obj);
++    MachineClass *mc = MACHINE_GET_CLASS(obj);
++
++    mc->name = g_strdup(SMP_CACHE_MACHINE_NAME);
++    mc->min_cpus = SMP_CACHE_MACHINE_MIN_CPUS;
++    mc->max_cpus = SMP_CACHE_MACHINE_MAX_CPUS;
+ 
+     for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
+         ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
+@@ -313,15 +318,6 @@ static void smp_cache_machine_init(Object *obj)
+     }
+ }
+ 
+-static void smp_cache_machine_class_init(ObjectClass *oc, void *data)
+-{
+-    MachineClass *mc = MACHINE_CLASS(oc);
+-
+-    mc->name = g_strdup(SMP_CACHE_MACHINE_NAME);
+-    mc->min_cpus = SMP_CACHE_MACHINE_MIN_CPUS;
+-    mc->max_cpus = SMP_CACHE_MACHINE_MAX_CPUS;
+-}
+-
+ static const TypeInfo smp_cache_machine_types[] = {
+     {
+         .name           = TYPE_MACHINE,
+@@ -332,7 +328,6 @@ static const TypeInfo smp_cache_machine_types[] = {
+     }, {
+         .name           = SMP_CACHE_MACHINE_TYPE,
+         .parent         = TYPE_MACHINE,
+-        .class_init     = smp_cache_machine_class_init,
+         .instance_init  = smp_cache_machine_init,
+     }
+ };
+-- 
+2.34.1
+

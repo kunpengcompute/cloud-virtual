@@ -1,0 +1,204 @@
+From 771b4c1cd1247b3ab52574529bec7c6f39c9fbb7 Mon Sep 17 00:00:00 2001
+From: huangchengfei <huangchengfei3@huawei.com>
+Date: Fri, 7 Mar 2025 15:25:12 +0800
+Subject: [PATCH 01/12] qapi/qom: Define cache enumeration and properties for
+ machine
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+mainline inclusion
+from mainline-master
+commit 4e88e7e3403df23a0fd7a95daad1f00da80bcf81
+category: feature
+Reference: https://github.com/qemu/qemu/commit/4e88e7e3403df23a0fd7a95daad1f00da80bcf81
+
+commit 4e88e7e3403df23a0fd7a95daad1f00da80bcf81 upstream
+
+The x86 and ARM need to allow user to configure cache properties
+(current only topology):
+ * For x86, the default cache topology model (of max/host CPU) does not
+   always match the Host's real physical cache topology. Performance can
+   increase when the configured virtual topology is closer to the
+   physical topology than a default topology would be.
+ * For ARM, QEMU can't get the cache topology information from the CPU
+   registers, then user configuration is necessary. Additionally, the
+   cache information is also needed for MPAM emulation (for TCG) to
+   build the right PPTT.
+
+Define smp-cache related enumeration and properties in QAPI, so that
+user could configure cache properties for SMP system through -machine in
+the subsequent patch.
+
+Cache enumeration (CacheLevelAndType) is implemented as the combination
+of cache level (level 1/2/3) and cache type (data/instruction/unified).
+
+Currently, separated L1 cache (L1 data cache and L1 instruction cache)
+with unified higher-level cache (e.g., unified L2 and L3 caches), is the
+most common cache architectures.
+
+Therefore, enumerate the L1 D-cache, L1 I-cache, L2 cache and L3 cache
+with smp-cache object to add the basic cache topology support. Other
+kinds of caches (e.g., L1 unified or L2/L3 separated caches) can be
+added directly into CacheLevelAndType if necessary.
+
+Cache properties (SmpCacheProperties) currently only contains cache
+topology information, and other cache properties can be added in it
+if necessary.
+
+Note, define cache topology based on CPU topology level with two
+reasons:
+
+ 1. In practice, a cache will always be bound to the CPU container
+    (either private in the CPU container or shared among multiple
+    containers), and CPU container is often expressed in terms of CPU
+    topology level.
+ 2. The x86's cache-related CPUIDs encode cache topology based on APIC
+    ID's CPU topology layout. And the ACPI PPTT table that ARM/RISCV
+    relies on also requires CPU containers to help indicate the private
+    shared hierarchy of the cache. Therefore, for SMP systems, it is
+    natural to use the CPU topology hierarchy directly in QEMU to define
+    the cache topology.
+
+With smp-cache QAPI support, add smp cache topology for machine by
+parsing the smp-cache object list.
+
+Also add the helper to access/update cache topology level of machine.
+
+Round to openeuler:
+*cache topology property is removed
+
+Suggested-by: Daniel P. Berrange <berrange@redhat.com>
+Signed-off-by: Zhao Liu <zhao1.liu@intel.com>
+Tested-by: Yongwei Ma <yongwei.ma@intel.com>
+Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+Message-ID: <20241101083331.340178-4-zhao1.liu@intel.com>
+Signed-off-by: Philippe Mathieu-Daudé <philmd@linaro.org>
+Signed-off-by: huangchengfei <huangchengfei3@huawei.com>
+---
+ hw/core/machine.c   | 36 ++++++++++++++++++++++++++++++++++++
+ include/hw/boards.h |  3 +++
+ qapi/machine.json   | 42 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 81 insertions(+)
+
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index 7b79634d0f..fac646202a 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -1007,6 +1007,38 @@ void machine_add_audiodev_property(MachineClass *mc)
+     object_class_property_set_description(oc, "audiodev",
+                                           "Audiodev to use for default machine devices");
+ }
++static void machine_get_smp_cache(Object *obj, Visitor *v, const char *name,
++                                  void *opaque, Error **errp)
++{
++    MachineState *ms = MACHINE(obj);
++    SmpCache *cache = &ms->smp_cache;
++    SmpCachePropertiesList *head = NULL;
++    SmpCachePropertiesList **tail = &head;
++
++    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
++        SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
++
++        node->cache = cache->props[i].cache;
++        QAPI_LIST_APPEND(tail, node);
++    }
++
++    visit_type_SmpCachePropertiesList(v, name, &head, errp);
++    qapi_free_SmpCachePropertiesList(head);
++}
++
++static void machine_set_smp_cache(Object *obj, Visitor *v, const char *name,
++                                  void *opaque, Error **errp)
++{
++    MachineState *ms = MACHINE(obj);
++    SmpCachePropertiesList *caches;
++
++    if (!visit_type_SmpCachePropertiesList(v, name, &caches, errp)) {
++        return;
++    }
++
++    machine_parse_smp_cache(ms, caches, errp);
++    qapi_free_SmpCachePropertiesList(caches);
++}
+ 
+ static void machine_class_init(ObjectClass *oc, void *data)
+ {
+@@ -1207,6 +1239,10 @@ static void machine_initfn(Object *obj)
+     }
+ 
+     machine_copy_boot_config(ms, &(BootConfiguration){ 0 });
++    
++    for (int i = 0; i < CACHE_LEVEL_AND_TYPE__MAX; i++) {
++        ms->smp_cache.props[i].cache = (CacheLevelAndType)i;
++    }
+ }
+ 
+ static void machine_finalize(Object *obj)
+diff --git a/include/hw/boards.h b/include/hw/boards.h
+index e1f3e06632..08a90c7d71 100644
+--- a/include/hw/boards.h
++++ b/include/hw/boards.h
+@@ -47,6 +47,9 @@ void machine_set_cache_topo_level(MachineState *ms, CacheLevelAndType cache,
+                                   CpuTopologyLevel level);
+ bool machine_check_smp_cache(const MachineState *ms, Error **errp);
+ void machine_memory_devices_init(MachineState *ms, hwaddr base, uint64_t size);
++bool machine_parse_smp_cache(MachineState *ms,
++                             const SmpCachePropertiesList *caches,
++                             Error **errp);
+ 
+ /**
+  * machine_class_allow_dynamic_sysbus_dev: Add type to list of valid devices
+diff --git a/qapi/machine.json b/qapi/machine.json
+index 10d76717c0..97de77ad6f 100644
+--- a/qapi/machine.json
++++ b/qapi/machine.json
+@@ -1836,3 +1836,45 @@
+ { 'command': 'dumpdtb',
+   'data': { 'filename': 'str' },
+   'if': 'CONFIG_FDT' }
++# @CacheLevelAndType:
++#
++# Caches a system may have.  The enumeration value here is the
++# combination of cache level and cache type.
++#
++# @l1d: L1 data cache.
++#
++# @l1i: L1 instruction cache.
++#
++# @l2: L2 (unified) cache.
++#
++# @l3: L3 (unified) cache
++#
++# Since: 9.2
++##
++{ 'enum': 'CacheLevelAndType',
++  'data': [ 'l1d', 'l1i', 'l2', 'l3' ] }
++
++##
++# @SmpCacheProperties:
++#
++# Cache information for SMP system.
++#
++# @cache: Cache name, which is the combination of cache level and cache type.
++#
++# Since: 9.2
++##
++{ 'struct': 'SmpCacheProperties',
++  'data': {
++  'cache': 'CacheLevelAndType' } }
++
++##
++# @SmpCachePropertiesWrapper:
++#
++# List wrapper of SmpCacheProperties.
++#
++# @caches: the list of SmpCacheProperties.
++#
++# Since 9.2
++##
++{ 'struct': 'SmpCachePropertiesWrapper',
++  'data': { 'caches': ['SmpCacheProperties'] } }
+-- 
+2.34.1
+

@@ -1,0 +1,40 @@
+From 5e1536b17cb54db52480f3c0ec4d33f21743f6cf Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Fri, 15 May 2026 14:11:04 +0800
+Subject: [PATCH 08/11]  libvirt: change QEMU smp-cache command line parameter
+ name from "location" to "topology"
+
+---
+ src/qemu/qemu_command.c                                 | 2 +-
+ tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/qemu/qemu_command.c b/src/qemu/qemu_command.c
+index 41113499f7..417c14bf03 100644
+--- a/src/qemu/qemu_command.c
++++ b/src/qemu/qemu_command.c
+@@ -7307,7 +7307,7 @@ qemuBuildMachineCommandLine(virCommand *cmd,
+             const char *str;
+             str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].cache);
+             virBufferAsprintf(&buf, ",smp-cache.%zu.cache=%s", i, str);
+-            virBufferAsprintf(&buf, ",smp-cache.%zu.location=%s", i,
++            virBufferAsprintf(&buf, ",smp-cache.%zu.topology=%s", i,
+                               virCPUCacheLevelBindLocationTypeToString(cpu->cacheinfo[i].location));
+             virBufferAsprintf(&buf, ",smp-cache.%zu.size=%u", i, cpu->cacheinfo[i].size);
+             virBufferAsprintf(&buf, ",smp-cache.%zu.sets=%u", i, cpu->cacheinfo[i].sets);
+diff --git a/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+index 845585b7cb..98682cdb78 100644
+--- a/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
++++ b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+@@ -10,7 +10,7 @@ XDG_CONFIG_HOME=/var/lib/libvirt/qemu/domain--1-foo/.config \
+ -name guest=foo,debug-threads=on \
+ -S \
+ -object '{"qom-type":"secret","id":"masterKey0","format":"raw","file":"/var/lib/libvirt/qemu/domain--1-foo/master-key.aes"}' \
+--machine pc,usb=off,dump-guest-core=off,memory-backend=pc.ram,acpi=off,smp-cache.0.cache=l1i,smp-cache.0.location=core,smp-cache.0.size=131072,smp-cache.0.sets=512,smp-cache.0.associativity=4,smp-cache.0.line=64,smp-cache.1.cache=l1d,smp-cache.1.location=core,smp-cache.1.size=65536,smp-cache.1.sets=256,smp-cache.1.associativity=4,smp-cache.1.line=64,smp-cache.2.cache=l2,smp-cache.2.location=core,smp-cache.2.size=1048576,smp-cache.2.sets=2048,smp-cache.2.associativity=8,smp-cache.2.line=64,smp-cache.3.cache=l3,smp-cache.3.location=cluster,smp-cache.3.size=23855104,smp-cache.3.sets=16384,smp-cache.3.associativity=19,smp-cache.3.line=64 \
++-machine pc,usb=off,dump-guest-core=off,memory-backend=pc.ram,acpi=off,smp-cache.0.cache=l1i,smp-cache.0.topology=core,smp-cache.0.size=131072,smp-cache.0.sets=512,smp-cache.0.associativity=4,smp-cache.0.line=64,smp-cache.1.cache=l1d,smp-cache.1.topology=core,smp-cache.1.size=65536,smp-cache.1.sets=256,smp-cache.1.associativity=4,smp-cache.1.line=64,smp-cache.2.cache=l2,smp-cache.2.topology=core,smp-cache.2.size=1048576,smp-cache.2.sets=2048,smp-cache.2.associativity=8,smp-cache.2.line=64,smp-cache.3.cache=l3,smp-cache.3.topology=cluster,smp-cache.3.size=23855104,smp-cache.3.sets=16384,smp-cache.3.associativity=19,smp-cache.3.line=64 \
+ -accel kvm \
+ -cpu host,migratable=off \
+ -m size=219136k \
+-- 
+2.34.1
+

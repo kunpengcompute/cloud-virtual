@@ -1,0 +1,303 @@
+From 6553b29480d5fc532ffe48fe48c9cfbcbb87627c Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt@live.cn>
+Date: Thu, 30 Apr 2026 16:33:32 +0800
+Subject: [PATCH 04/12] qemu: arm64: add ut for smp cache info
+
+---
+ tests/unit/meson.build      |   1 +
+ tests/unit/test-smp-cache.c | 270 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 271 insertions(+)
+ create mode 100644 tests/unit/test-smp-cache.c
+
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+index 598ba41bb9..140afc1bfd 100644
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -139,6 +139,7 @@ if have_system
+     'test-base64': [],
+     'test-bufferiszero': [],
+     'test-smp-parse': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
++    'test-smp-cache': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
+     'test-vmstate': [migration, io],
+     'test-yank': ['socket-helpers.c', qom, io, chardev]
+   }
+diff --git a/tests/unit/test-smp-cache.c b/tests/unit/test-smp-cache.c
+new file mode 100644
+index 0000000000..4edb1e2279
+--- /dev/null
++++ b/tests/unit/test-smp-cache.c
+@@ -0,0 +1,270 @@
++/*
++ * SMP Cache parsing unit-tests
++ *
++ * Copyright (c) 2026 Huawei Technologies Co., Ltd
++ *
++ * This work is licensed under the terms of the GNU LGPL, version 2.1 or later.
++ * See the COPYING.LIB file in the top-level directory.
++ */
++
++#include "qemu/osdep.h"
++#include "qom/object.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "qapi/qapi-types-machine.h"
++
++#include "hw/boards.h"
++
++/*
++ * Test case: valid single cache configuration
++ */
++static void test_machine_parse_smp_cache_single_l1d(void)
++{
++    MachineState ms = {0};
++    Error *errp = NULL;
++    SmpCachePropertiesList *caches = NULL;
++    SmpCachePropertiesList **tail = &caches;
++    
++    SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
++    node->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node->size = 32768;
++    node->sets = 32;
++    node->associativity = 8;
++    node->line = 64;
++    
++    QAPI_LIST_APPEND(tail, node);
++    
++    bool result = machine_parse_smp_cache(&ms, caches, &errp);
++    
++    g_assert_true(result);
++    g_assert_null(errp);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, 32768);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].sets, ==, 32);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].associativity, ==, 8);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].line, ==, 64);
++    
++    qapi_free_SmpCachePropertiesList(caches);
++}
++
++/*
++ * Test case: valid multiple cache configuration
++ */
++static void test_machine_parse_smp_cache_multiple(void)
++{
++    MachineState ms = {0};
++    Error *errp = NULL;
++    SmpCachePropertiesList *caches = NULL;
++    SmpCachePropertiesList **tail = &caches;
++    
++    /* L1D cache */
++    SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
++    node1->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node1->size = 32768;
++    node1->sets = 32;
++    node1->associativity = 8;
++    node1->line = 64;
++    QAPI_LIST_APPEND(tail, node1);
++    
++    /* L1I cache */
++    SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
++    node2->name = CACHE_LEVEL_AND_TYPE_L1I;
++    node2->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node2->size = 32768;
++    node2->sets = 32;
++    node2->associativity = 8;
++    node2->line = 64;
++    QAPI_LIST_APPEND(tail, node2);
++    
++    /* L2 cache */
++    SmpCacheProperties *node3 = g_new(SmpCacheProperties, 1);
++    node3->name = CACHE_LEVEL_AND_TYPE_L2;
++    node3->location = CACHE_BIND_PROCESS_HIERARCHY_DIE;
++    node3->size = 262144;
++    node3->sets = 256;
++    node3->associativity = 16;
++    node3->line = 64;
++    QAPI_LIST_APPEND(tail, node3);
++    
++    bool result = machine_parse_smp_cache(&ms, caches, &errp);
++    
++    g_assert_true(result);
++    g_assert_null(errp);
++    
++    /* Verify L1D */
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].size, ==, 32768);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1D].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    
++    /* Verify L1I */
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].size, ==, 32768);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L1I].location, ==, CACHE_BIND_PROCESS_HIERARCHY_CORE);
++    
++    /* Verify L2 */
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].size, ==, 262144);
++    g_assert_cmpuint(ms.smp_cache.props[CACHE_LEVEL_AND_TYPE_L2].location, ==, CACHE_BIND_PROCESS_HIERARCHY_DIE);
++    
++    qapi_free_SmpCachePropertiesList(caches);
++}
++
++/*
++ * Test case: duplicate cache should fail
++ */
++static void test_machine_parse_smp_cache_duplicate(void)
++{
++    MachineState ms = {0};
++    Error *errp = NULL;
++    SmpCachePropertiesList *caches = NULL;
++    SmpCachePropertiesList **tail = &caches;
++    
++    /* Add L1D cache twice */
++    SmpCacheProperties *node1 = g_new(SmpCacheProperties, 1);
++    node1->name = CACHE_LEVEL_AND_TYPE_L1D;
++    node1->location = CACHE_BIND_PROCESS_HIERARCHY_CORE;
++    node1->size = 32768;
++    node1->sets = 32;
++    node1->associativity = 8;
++    node1->line = 64;
++    QAPI_LIST_APPEND(tail, node1);
++    
++    SmpCacheProperties *node2 = g_new(SmpCacheProperties, 1);
++    node2->name = CACHE_LEVEL_AND_TYPE_L1D;  /* duplicate */
++    node2->location = CACHE_BIND_PROCESS_HIERARCHY_THREAD;
++    node2->size = 16384;
++    node2->sets = 16;
++    node2->associativity = 4;
++    node2->line = 64;
++    QAPI_LIST_APPEND(tail, node2);
++    
++    bool result = machine_parse_smp_cache(&ms, caches, &errp);
++    
++    g_assert_false(result);
++    g_assert_nonnull(errp);
++    
++    error_free(errp);
++    qapi_free_SmpCachePropertiesList(caches);
++}
++
++/*
++ * Test case: machine_get_cache_size and machine_set_cache_size
++ */
++static void test_machine_cache_size_get_set(void)
++{
++    MachineState ms = {0};
++    
++    /* Initial size should be 0 */
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 0);
++    
++    /* Set cache size */
++    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D, 65536);
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 65536);
++    
++    /* Set another cache */
++    machine_set_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2, 524288);
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L2), ==, 524288);
++    
++    /* L1D should still be 65536 */
++    g_assert_cmpuint(machine_get_cache_size(&ms, CACHE_LEVEL_AND_TYPE_L1D), ==, 65536);
++}
++
++/*
++ * Test case: all cache levels
++ */
++static void test_machine_parse_smp_cache_all_levels(void)
++{
++    MachineState ms = {0};
++    Error *errp = NULL;
++    SmpCachePropertiesList *caches = NULL;
++    SmpCachePropertiesList **tail = &caches;
++    
++    /* Add all cache levels */
++    CacheLevelAndType levels[] = {
++        CACHE_LEVEL_AND_TYPE_L1D,
++        CACHE_LEVEL_AND_TYPE_L1I,
++        CACHE_LEVEL_AND_TYPE_L1,
++        CACHE_LEVEL_AND_TYPE_L2,
++        CACHE_LEVEL_AND_TYPE_L3
++    };
++    
++    for (int i = 0; i < 5; i++) {
++        SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
++        node->name = levels[i];
++        node->location = CACHE_BIND_PROCESS_HIERARCHY_SOCKET;
++        node->size = (i + 1) * 32768;
++        node->sets = (i + 1) * 16;
++        node->associativity = (i + 1) * 2;
++        node->line = 64;
++        QAPI_LIST_APPEND(tail, node);
++    }
++    
++    bool result = machine_parse_smp_cache(&ms, caches, &errp);
++    
++    g_assert_true(result);
++    g_assert_null(errp);
++    
++    /* Verify all cache levels */
++    for (int i = 0; i < 5; i++) {
++        g_assert_cmpuint(ms.smp_cache.props[levels[i]].size, ==, (i + 1) * 32768);
++        g_assert_cmpuint(ms.smp_cache.props[levels[i]].sets, ==, (i + 1) * 16);
++        g_assert_cmpuint(ms.smp_cache.props[levels[i]].associativity, ==, (i + 1) * 2);
++    }
++    
++    qapi_free_SmpCachePropertiesList(caches);
++}
++
++/*
++ * Test case: different binding process hierarchies
++ */
++static void test_machine_parse_smp_cache_bindings(void)
++{
++    MachineState ms = {0};
++    Error *errp = NULL;
++    SmpCachePropertiesList *caches = NULL;
++    SmpCachePropertiesList **tail = &caches;
++    
++    CacheBindProcessHierarchy bindings[] = {
++        CACHE_BIND_PROCESS_HIERARCHY_THREAD,
++        CACHE_BIND_PROCESS_HIERARCHY_CORE,
++        CACHE_BIND_PROCESS_HIERARCHY_CLUSTER,
++        CACHE_BIND_PROCESS_HIERARCHY_DIE,
++        CACHE_BIND_PROCESS_HIERARCHY_SOCKET
++    };
++    
++    for (int i = 0; i < 5; i++) {
++        SmpCacheProperties *node = g_new(SmpCacheProperties, 1);
++        node->name = i;
++        node->location = bindings[i];
++        node->size = 32768;
++        node->sets = 32;
++        node->associativity = 8;
++        node->line = 64;
++        QAPI_LIST_APPEND(tail, node);
++    }
++    
++    bool result = machine_parse_smp_cache(&ms, caches, &errp);
++    
++    g_assert_true(result);
++    g_assert_null(errp);
++    
++    /* Verify all binding hierarchies */
++    for (int i = 0; i < 5; i++) {
++        g_assert_cmpuint(ms.smp_cache.props[i].location, ==, bindings[i]);
++    }
++    
++    qapi_free_SmpCachePropertiesList(caches);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    
++    g_test_add_func("/smp-cache/parse_single_l1d", test_machine_parse_smp_cache_single_l1d);
++    g_test_add_func("/smp-cache/parse_multiple", test_machine_parse_smp_cache_multiple);
++    g_test_add_func("/smp-cache/parse_duplicate", test_machine_parse_smp_cache_duplicate);
++    g_test_add_func("/smp-cache/cache_size_get_set", test_machine_cache_size_get_set);
++    g_test_add_func("/smp-cache/parse_all_levels", test_machine_parse_smp_cache_all_levels);
++    g_test_add_func("/smp-cache/parse_bindings", test_machine_parse_smp_cache_bindings);
++    
++    return g_test_run();
++}
+\ No newline at end of file
+-- 
+2.34.1
+

@@ -1,0 +1,429 @@
+From 02ce5b54be690ff8cf7217ad7a2d5a9d08153dfd Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Wed, 13 May 2026 11:24:17 +0800
+Subject: [PATCH 05/11] libvirt: rename cacheinfo name to cache, extract macros
+
+---
+ src/conf/cpu_conf.c                           | 113 +++++++++++-------
+ src/conf/cpu_conf.h                           |   2 +-
+ src/conf/schemas/cputypes.rng                 |   2 +-
+ src/qemu/qemu_command.c                       |   4 +-
+ .../x86_64-cacheinfo-defaults-result.xml      |   8 +-
+ .../cputestdata/x86_64-cacheinfo-defaults.xml |   8 +-
+ .../x86_64-cacheinfo-full-result.xml          |   8 +-
+ tests/cputestdata/x86_64-cacheinfo-full.xml   |   8 +-
+ .../cpu-cacheinfo.x86_64-latest.args          |   2 +-
+ tests/qemuxml2argvdata/cpu-cacheinfo.xml      |   8 +-
+ 10 files changed, 96 insertions(+), 67 deletions(-)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index 878b769a5a..36403ce6e0 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -31,6 +31,35 @@
+ 
+ #define VIR_FROM_THIS VIR_FROM_CPU
+ 
++/* Cache size unit conversion */
++#define CACHE_KB                    1024
++#define CACHE_MB                    (1024 * 1024)
++
++/* String to integer conversion base */
++#define CACHE_STR_TO_INT_BASE       10
++
++/* Default cache sizes (in bytes) */
++#define CACHE_L1D_DEFAULT_SIZE      (32 * CACHE_KB)
++#define CACHE_L1I_DEFAULT_SIZE      (64 * CACHE_KB)
++#define CACHE_L1_DEFAULT_SIZE       (64 * CACHE_KB)
++#define CACHE_L2_DEFAULT_SIZE       (1 * CACHE_MB)
++#define CACHE_L3_DEFAULT_SIZE       (22 * CACHE_MB)
++
++/* Default cache associativity */
++#define CACHE_L1_DEFAULT_ASSOC      0x4
++#define CACHE_L2_DEFAULT_ASSOC      0x8
++#define CACHE_L3_DEFAULT_ASSOC      0x13
++
++/* Default cache line size (in bytes) */
++#define CACHE_DEFAULT_LINE          64
++
++/* Default cache sets */
++#define CACHE_L1D_DEFAULT_SETS      256
++#define CACHE_L1I_DEFAULT_SETS      512
++#define CACHE_L1_DEFAULT_SETS       512
++#define CACHE_L2_DEFAULT_SETS       2048
++#define CACHE_L3_DEFAULT_SETS       16384
++
+ VIR_LOG_INIT("conf.cpu_conf");
+ 
+ VIR_ENUM_IMPL(virCPU,
+@@ -363,9 +392,9 @@ virCPUDefParseXMLCache(virCPUDef *def,
+  * cache info 透传功能相关参数的默认值函数
+  */
+ static virCPUCacheLevelBindLocation
+-virGetCacheInfoDefaultLocation(virCPUCacheLevelAndType name)
++virGetCacheInfoDefaultLocation(virCPUCacheLevelAndType cache_type)
+ {
+-    switch (name)
++    switch (cache_type)
+     {
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
+@@ -381,20 +410,20 @@ virGetCacheInfoDefaultLocation(virCPUCacheLevelAndType name)
+ }
+ 
+ static unsigned int
+-virGetCacheInfoDefaultSize(virCPUCacheLevelAndType name)
++virGetCacheInfoDefaultSize(virCPUCacheLevelAndType cache_type)
+ {
+-    switch (name)
++    switch (cache_type)
+     {
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
+-        return 32 * 1024;
++        return CACHE_L1D_DEFAULT_SIZE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
+-        return 64 * 1024;
++        return CACHE_L1I_DEFAULT_SIZE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
+-        return 64 * 1024;
++        return CACHE_L1_DEFAULT_SIZE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
+-        return 1024 * 1024;
++        return CACHE_L2_DEFAULT_SIZE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
+-        return 22 * 1024 * 1024;
++        return CACHE_L3_DEFAULT_SIZE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
+     default:
+         return 0;
+@@ -402,16 +431,16 @@ virGetCacheInfoDefaultSize(virCPUCacheLevelAndType name)
+ }
+ 
+ static unsigned int
+-virGetCacheInfoDefaultLine(virCPUCacheLevelAndType name)
++virGetCacheInfoDefaultLine(virCPUCacheLevelAndType cache_type)
+ {
+-    switch (name)
++    switch (cache_type)
+     {
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
+-        return 64;
++        return CACHE_DEFAULT_LINE;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
+     default:
+         return 0;
+@@ -419,18 +448,18 @@ virGetCacheInfoDefaultLine(virCPUCacheLevelAndType name)
+ }
+ 
+ static unsigned int
+-virGetCacheInfoDefaultAssociativity(virCPUCacheLevelAndType name)
++virGetCacheInfoDefaultAssociativity(virCPUCacheLevelAndType cache_type)
+ {
+-    switch (name)
++    switch (cache_type)
+     {
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
+-        return 0x4;
++        return CACHE_L1_DEFAULT_ASSOC;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
+-        return 0x8;
++        return CACHE_L2_DEFAULT_ASSOC;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
+-        return 0x13;
++        return CACHE_L3_DEFAULT_ASSOC;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
+     default:
+         return 0;
+@@ -438,20 +467,20 @@ virGetCacheInfoDefaultAssociativity(virCPUCacheLevelAndType name)
+ }
+ 
+ static unsigned int
+-virGetCacheInfoDefaultSets(virCPUCacheLevelAndType name)
++virGetCacheInfoDefaultSets(virCPUCacheLevelAndType cache_type)
+ {
+-    switch (name)
++    switch (cache_type)
+     {
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1D:
+-        return 256;
++        return CACHE_L1D_DEFAULT_SETS;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1I:
+-        return 512;
++        return CACHE_L1I_DEFAULT_SETS;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L1:
+-        return 512;
++        return CACHE_L1_DEFAULT_SETS;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L2:
+-        return 2048;
++        return CACHE_L2_DEFAULT_SETS;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_L3:
+-        return 16384;
++        return CACHE_L3_DEFAULT_SETS;
+     case VIR_CPU_CACHE_LEVEL_AND_TYPE_LAST:
+     default:
+         return 0;
+@@ -789,7 +818,7 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+     }
+ 
+     for (i = 0; i < n; i++) {
+-        virCPUCacheLevelAndType cache_name;
++        virCPUCacheLevelAndType cache_type;
+         virCPUCacheLevelBindLocation location;
+         char *tmp;
+         unsigned int size;
+@@ -797,16 +826,16 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+         unsigned int associativity;
+         unsigned int line;
+ 
+-        tmp = virXMLPropString(nodes[i], "name");
++        tmp = virXMLPropString(nodes[i], "cache");
+         if (tmp == NULL) {
+             virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                            _("Missing cache level and type"));
+             return -1;
+         }
+-        cache_name = virCPUCacheLevelAndTypeTypeFromString(tmp);
++        cache_type = virCPUCacheLevelAndTypeTypeFromString(tmp);
+         VIR_FREE(tmp);
+ 
+-        if (cache_name < 0) {
++        if (cache_type < 0) {
+             virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                            _("Invalid CPU cache level and type"));
+             return -1;
+@@ -814,7 +843,7 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "location");
+         if (tmp == NULL) {
+-            location = virGetCacheInfoDefaultLocation(cache_name);
++            location = virGetCacheInfoDefaultLocation(cache_type);
+         }
+         else {
+             location = virCPUCacheLevelBindLocationTypeFromString(tmp);
+@@ -828,9 +857,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "size");
+         if (tmp == NULL) {
+-            size = virGetCacheInfoDefaultSize(cache_name);
++            size = virGetCacheInfoDefaultSize(cache_type);
+         }
+-        else if (virStrToLong_ui(tmp, NULL, 10, &size) < 0) {
++        else if (virStrToLong_ui(tmp, NULL, CACHE_STR_TO_INT_BASE, &size) < 0) {
+             virReportError(VIR_ERR_XML_ERROR,
+                             _("invalid setting for cache size '%s'"), tmp);
+             VIR_FREE(tmp);
+@@ -840,9 +869,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "sets");
+         if (tmp == NULL) {
+-            sets = virGetCacheInfoDefaultSets(cache_name);
++            sets = virGetCacheInfoDefaultSets(cache_type);
+         }
+-        else if (virStrToLong_ui(tmp, NULL, 10, &sets) < 0) {
++        else if (virStrToLong_ui(tmp, NULL, CACHE_STR_TO_INT_BASE, &sets) < 0) {
+             virReportError(VIR_ERR_XML_ERROR,
+                             _("invalid setting for cache sets '%s'"), tmp);
+             VIR_FREE(tmp);
+@@ -852,9 +881,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "associativity");
+         if (tmp == NULL) {
+-            associativity = virGetCacheInfoDefaultAssociativity(cache_name);
++            associativity = virGetCacheInfoDefaultAssociativity(cache_type);
+         }
+-        else if (virStrToLong_ui(tmp, NULL, 10, &associativity) < 0) {
++        else if (virStrToLong_ui(tmp, NULL, CACHE_STR_TO_INT_BASE, &associativity) < 0) {
+             virReportError(VIR_ERR_XML_ERROR,
+                             _("invalid setting for cache associativity '%s'"), tmp);
+             VIR_FREE(tmp);
+@@ -864,9 +893,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+ 
+         tmp = virXMLPropString(nodes[i], "line");
+         if (tmp == NULL) {
+-            line = virGetCacheInfoDefaultLine(cache_name);
++            line = virGetCacheInfoDefaultLine(cache_type);
+         }
+-        else if (virStrToLong_ui(tmp, NULL, 10, &line) < 0) {
++        else if (virStrToLong_ui(tmp, NULL, CACHE_STR_TO_INT_BASE, &line) < 0) {
+             virReportError(VIR_ERR_XML_ERROR,
+                             _("invalid setting for cache line '%s'"), tmp);
+             VIR_FREE(tmp);
+@@ -874,7 +903,7 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+         }
+         VIR_FREE(tmp);
+ 
+-        def->cacheinfo[i].name = cache_name;
++        def->cacheinfo[i].name = cache_type;
+         def->cacheinfo[i].size = size;
+         def->cacheinfo[i].sets = sets;
+         def->cacheinfo[i].associativity = associativity;
+@@ -1101,9 +1130,9 @@ virCPUDefFormatBuf(virBuffer *buf,
+     for (i = 0; i < def->ncacheinfo; i++) {
+         virCPUCacheInfoDefPtr cacheinfo = def->cacheinfo + i;
+ 
+-        virBufferAsprintf(buf, 
+-                          "<cacheinfo name='%s' location='%s' size='%u' sets='%u' associativity='%u' line='%u'/>\n",
+-                          virCPUCacheLevelAndTypeTypeToString(cacheinfo->name),
++        virBufferAsprintf(buf,
++                          "<cacheinfo cache='%s' location='%s' size='%u' sets='%u' associativity='%u' line='%u'/>\n",
++                          virCPUCacheLevelAndTypeTypeToString(cacheinfo->cache),
+                           virCPUCacheLevelBindLocationTypeToString(cacheinfo->location),
+                           cacheinfo->size, cacheinfo->sets, cacheinfo->associativity, cacheinfo->line);
+     }
+@@ -1422,7 +1451,7 @@ virCPUDefIsEqual(virCPUDef *src,
+     }
+ 
+     for (i = 0; i < src->ncacheinfo; i++) {
+-        if (src->cacheinfo[i].name != dst->cacheinfo[i].name ||
++        if (src->cacheinfo[i].cache != dst->cacheinfo[i].cache ||
+             src->cacheinfo[i].size != dst->cacheinfo[i].size) {
+             MISMATCH("%s", _("Target CPU cacheinfo does not match source"));
+             return false;
+diff --git a/src/conf/cpu_conf.h b/src/conf/cpu_conf.h
+index 555db7dd09..374f644029 100644
+--- a/src/conf/cpu_conf.h
++++ b/src/conf/cpu_conf.h
+@@ -142,7 +142,7 @@ VIR_ENUM_DECL(virCPUCacheLevelBindLocation);
+ typedef struct _virCPUCacheInfoDef virCPUCacheInfoDef;
+ typedef virCPUCacheInfoDef *virCPUCacheInfoDefPtr;
+ struct _virCPUCacheInfoDef {
+-    virCPUCacheLevelAndType name;
++    virCPUCacheLevelAndType cache;
+     virCPUCacheLevelBindLocation location;
+     unsigned int size;
+     unsigned int sets;
+diff --git a/src/conf/schemas/cputypes.rng b/src/conf/schemas/cputypes.rng
+index b54f437f82..e10332dfab 100644
+--- a/src/conf/schemas/cputypes.rng
++++ b/src/conf/schemas/cputypes.rng
+@@ -475,7 +475,7 @@
+ 
+   <define name="cpuCacheInfo">
+     <element name="cacheinfo">
+-      <attribute name="name">
++      <attribute name="cache">
+         <choice>
+           <value>l1i</value>
+           <value>l1d</value>
+diff --git a/src/qemu/qemu_command.c b/src/qemu/qemu_command.c
+index 2cefc7c634..41113499f7 100644
+--- a/src/qemu/qemu_command.c
++++ b/src/qemu/qemu_command.c
+@@ -7305,8 +7305,8 @@ qemuBuildMachineCommandLine(virCommand *cmd,
+     if (cpu) {
+         for (i = 0; i < cpu->ncacheinfo; i++) {
+             const char *str;
+-            str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].name);
+-            virBufferAsprintf(&buf, ",smp-cache.%zu.name=%s", i, str);
++            str = virCPUCacheLevelAndTypeTypeToString(cpu->cacheinfo[i].cache);
++            virBufferAsprintf(&buf, ",smp-cache.%zu.cache=%s", i, str);
+             virBufferAsprintf(&buf, ",smp-cache.%zu.location=%s", i,
+                               virCPUCacheLevelBindLocationTypeToString(cpu->cacheinfo[i].location));
+             virBufferAsprintf(&buf, ",smp-cache.%zu.size=%u", i, cpu->cacheinfo[i].size);
+diff --git a/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml b/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
+index 4eca5da051..d249a97277 100644
+--- a/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
++++ b/tests/cputestdata/x86_64-cacheinfo-defaults-result.xml
+@@ -1,7 +1,7 @@
+ <cpu mode='host-passthrough' migratable='off'>
+   <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
+-  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
+-  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
+-  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
+-  <cacheinfo name='l3' location='cluster' size='23068672' sets='16384' associativity='19' line='64'/>
++  <cacheinfo cache='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo cache='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo cache='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo cache='l3' location='cluster' size='23068672' sets='16384' associativity='19' line='64'/>
+ </cpu>
+diff --git a/tests/cputestdata/x86_64-cacheinfo-defaults.xml b/tests/cputestdata/x86_64-cacheinfo-defaults.xml
+index d32419bb4d..f6e1c9fb22 100644
+--- a/tests/cputestdata/x86_64-cacheinfo-defaults.xml
++++ b/tests/cputestdata/x86_64-cacheinfo-defaults.xml
+@@ -1,7 +1,7 @@
+ <cpu mode='host-passthrough' migratable='off'>
+   <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
+-  <cacheinfo name='l1i'/>
+-  <cacheinfo name='l1d'/>
+-  <cacheinfo name='l2'/>
+-  <cacheinfo name='l3'/>
++  <cacheinfo cache='l1i'/>
++  <cacheinfo cache='l1d'/>
++  <cacheinfo cache='l2'/>
++  <cacheinfo cache='l3'/>
+ </cpu>
+\ No newline at end of file
+diff --git a/tests/cputestdata/x86_64-cacheinfo-full-result.xml b/tests/cputestdata/x86_64-cacheinfo-full-result.xml
+index 4d3f21783f..bc5b6f4d62 100644
+--- a/tests/cputestdata/x86_64-cacheinfo-full-result.xml
++++ b/tests/cputestdata/x86_64-cacheinfo-full-result.xml
+@@ -1,7 +1,7 @@
+ <cpu mode='host-passthrough' migratable='off'>
+   <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
+-  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
+-  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
+-  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
+-  <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++  <cacheinfo cache='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo cache='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo cache='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo cache='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
+ </cpu>
+diff --git a/tests/cputestdata/x86_64-cacheinfo-full.xml b/tests/cputestdata/x86_64-cacheinfo-full.xml
+index b8a22624cf..3961a046b2 100644
+--- a/tests/cputestdata/x86_64-cacheinfo-full.xml
++++ b/tests/cputestdata/x86_64-cacheinfo-full.xml
+@@ -1,7 +1,7 @@
+ <cpu mode='host-passthrough' migratable='off'>
+   <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
+-  <cacheinfo name='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
+-  <cacheinfo name='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
+-  <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
+-  <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++  <cacheinfo cache='l1i' location='core' size='65536' sets='512' associativity='4' line='64'/>
++  <cacheinfo cache='l1d' location='core' size='32768' sets='256' associativity='4' line='64'/>
++  <cacheinfo cache='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++  <cacheinfo cache='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
+ </cpu>
+\ No newline at end of file
+diff --git a/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+index ccdf25230a..845585b7cb 100644
+--- a/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
++++ b/tests/qemuxml2argvdata/cpu-cacheinfo.x86_64-latest.args
+@@ -10,7 +10,7 @@ XDG_CONFIG_HOME=/var/lib/libvirt/qemu/domain--1-foo/.config \
+ -name guest=foo,debug-threads=on \
+ -S \
+ -object '{"qom-type":"secret","id":"masterKey0","format":"raw","file":"/var/lib/libvirt/qemu/domain--1-foo/master-key.aes"}' \
+--machine pc,usb=off,dump-guest-core=off,memory-backend=pc.ram,acpi=off,smp-cache.0.name=l1i,smp-cache.0.location=core,smp-cache.0.size=131072,smp-cache.0.sets=512,smp-cache.0.associativity=4,smp-cache.0.line=64,smp-cache.1.name=l1d,smp-cache.1.location=core,smp-cache.1.size=65536,smp-cache.1.sets=256,smp-cache.1.associativity=4,smp-cache.1.line=64,smp-cache.2.name=l2,smp-cache.2.location=core,smp-cache.2.size=1048576,smp-cache.2.sets=2048,smp-cache.2.associativity=8,smp-cache.2.line=64,smp-cache.3.name=l3,smp-cache.3.location=cluster,smp-cache.3.size=23855104,smp-cache.3.sets=16384,smp-cache.3.associativity=19,smp-cache.3.line=64 \
++-machine pc,usb=off,dump-guest-core=off,memory-backend=pc.ram,acpi=off,smp-cache.0.cache=l1i,smp-cache.0.location=core,smp-cache.0.size=131072,smp-cache.0.sets=512,smp-cache.0.associativity=4,smp-cache.0.line=64,smp-cache.1.cache=l1d,smp-cache.1.location=core,smp-cache.1.size=65536,smp-cache.1.sets=256,smp-cache.1.associativity=4,smp-cache.1.line=64,smp-cache.2.cache=l2,smp-cache.2.location=core,smp-cache.2.size=1048576,smp-cache.2.sets=2048,smp-cache.2.associativity=8,smp-cache.2.line=64,smp-cache.3.cache=l3,smp-cache.3.location=cluster,smp-cache.3.size=23855104,smp-cache.3.sets=16384,smp-cache.3.associativity=19,smp-cache.3.line=64 \
+ -accel kvm \
+ -cpu host,migratable=off \
+ -m size=219136k \
+diff --git a/tests/qemuxml2argvdata/cpu-cacheinfo.xml b/tests/qemuxml2argvdata/cpu-cacheinfo.xml
+index 3cedb25cc2..473405f51b 100644
+--- a/tests/qemuxml2argvdata/cpu-cacheinfo.xml
++++ b/tests/qemuxml2argvdata/cpu-cacheinfo.xml
+@@ -10,10 +10,10 @@
+   </os>
+   <cpu mode='host-passthrough' migratable='off'>
+     <topology sockets='1' dies='1' clusters='1' cores='4' threads='1'/>
+-    <cacheinfo name='l1i' location='core' size='131072' sets='512' associativity='4' line='64'/>
+-    <cacheinfo name='l1d' location='core' size='65536' sets='256' associativity='4' line='64'/>
+-    <cacheinfo name='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
+-    <cacheinfo name='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
++    <cacheinfo cache='l1i' location='core' size='131072' sets='512' associativity='4' line='64'/>
++    <cacheinfo cache='l1d' location='core' size='65536' sets='256' associativity='4' line='64'/>
++    <cacheinfo cache='l2' location='core' size='1048576' sets='2048' associativity='8' line='64'/>
++    <cacheinfo cache='l3' location='cluster' size='23855104' sets='16384' associativity='19' line='64'/>
+   </cpu>
+   <clock offset='utc'/>
+   <on_poweroff>destroy</on_poweroff>
+-- 
+2.34.1
+
