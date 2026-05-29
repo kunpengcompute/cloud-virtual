@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <numa.h>
 #include <memlink_sdk.h>
+#include <securec.h>
 
 #define LOW_WATERMARK (1.0 / 5.0)
 #define BOTTOM_SIZE (1.0 / 10.0)
@@ -108,7 +109,13 @@ int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
 
         /* Build batch */
         for (int i = processed; i < N && batch_count < BATCH_SIZE; i++, batch_count++) {
-            len += snprintf(buf + len, sizeof(buf) - len, "0x%lx\n", (uintptr_t)topn[i].addr);
+            int sret = snprintf_s(buf + len, sizeof(buf) - len, sizeof(buf) - len, "0x%lx\n", (uintptr_t)topn[i].addr);
+            if (sret < 0) {
+                LOG_ERR("snprintf_s failed in batch build\n");
+                free(topn);
+                return -1;
+            }
+            len += sret;
         }
 
         /* Send batch */
@@ -132,7 +139,10 @@ int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
 int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool warning)
 {
     char path[256];
-    snprintf(path, sizeof(path), "/proc/%d/swap_pages", pid);
+    if (snprintf_s(path, sizeof(path), sizeof(path) - 1, "/proc/%d/swap_pages", pid) < 0) {
+        LOG_ERR("Failed to format path for pid %d\n", pid);
+        return -1;
+    }
 
     int fd = open(path, O_WRONLY);
 
@@ -145,6 +155,7 @@ int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool wa
     void **addrs = malloc(num_pages * sizeof(void*));
     if (!addrs) {
         LOG_ERR("Failed to allocate memory for addrs\n");
+        close(fd);
         return -1;
     }
 
@@ -166,15 +177,25 @@ int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool wa
 unsigned long get_node_free_hugepages(int node)
 {
     char path[256];
-    snprintf(path, sizeof(path),
+    if (snprintf_s(path, sizeof(path), sizeof(path) - 1,
         "/sys/devices/system/node/node%d/hugepages/hugepages-2048kB/free_hugepages",
-        node);
+        node) < 0) {
+        LOG_ERR("snprintf_s failed for free_hugepages path on node %d\n", node);
+        return 0;
+    }
 
     FILE *fp = fopen(path, "r");
-    if (!fp) return 0;
+    if (!fp) {
+        LOG_WARN("Failed to open free_hugepages on node %d\n", node);
+        return 0;
+    }
 
     unsigned long pages = 0;
-    fscanf(fp, "%lu", &pages);
+    if (fscanf_s(fp, "%lu", &pages) != 1) {
+        LOG_WARN("Failed to read free_hugepages on node %d\n", node);
+        fclose(fp);
+        return 0;
+    }
     fclose(fp);
 
     return pages;
@@ -183,15 +204,25 @@ unsigned long get_node_free_hugepages(int node)
 unsigned long get_node_nr_hugepages(int node)
 {
     char path[256];
-    snprintf(path, sizeof(path),
+    if (snprintf_s(path, sizeof(path), sizeof(path) - 1,
         "/sys/devices/system/node/node%d/hugepages/hugepages-2048kB/nr_hugepages",
-        node);
+        node) < 0) {
+        LOG_ERR("snprintf_s failed for nr_hugepages path on node %d\n", node);
+        return 0;
+    }
 
     FILE *fp = fopen(path, "r");
-    if (!fp) return 0;
+    if (!fp) {
+        LOG_WARN("Failed to open nr_hugepages on node %d\n", node);
+        return 0;
+    }
 
     unsigned long pages = 0;
-    fscanf(fp, "%lu", &pages);
+    if (fscanf_s(fp, "%lu", &pages) != 1) {
+        LOG_WARN("Failed to read nr_hugepages on node %d\n", node);
+        fclose(fp);
+        return 0;
+    }
     fclose(fp);
 
     return pages;
@@ -201,13 +232,23 @@ unsigned long get_node_nr_hugepages(int node)
 int is_process_on_node(pid_t pid, int node)
 {
     char path[256], line[512];
-    snprintf(path, sizeof(path), "/proc/%d/numa_maps", pid);
+    if (snprintf_s(path, sizeof(path), sizeof(path) - 1, "/proc/%d/numa_maps", pid) < 0) {
+        LOG_ERR("snprintf_s failed for numa_maps path of pid %d\n", pid);
+        return 0;
+    }
 
     FILE *fp = fopen(path, "r");
-    if (!fp) return 0;
+    if (!fp) {
+        LOG_WARN("Failed to open /proc/%d/numa_maps\n", pid);
+        return 0;
+    }
 
     char pattern[32];
-    snprintf(pattern, sizeof(pattern), "N%d=", node);
+    if (snprintf_s(pattern, sizeof(pattern), sizeof(pattern) - 1, "N%d=", node) < 0) {
+        LOG_ERR("snprintf_s failed for numa pattern of node %d\n", node);
+        fclose(fp);
+        return 0;
+    }
 
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, pattern)) {
@@ -224,7 +265,10 @@ int is_process_on_node(pid_t pid, int node)
 int vma_on_node(const char *line, int node)
 {
     char pattern[32];
-    snprintf(pattern, sizeof(pattern), "N%d=", node);
+    if (snprintf_s(pattern, sizeof(pattern), sizeof(pattern) - 1, "N%d=", node) < 0) {
+        LOG_ERR("snprintf_s failed for vma pattern of node %d\n", node);
+        return 0;
+    }
     return strstr(line, pattern) != NULL;
 }
 
@@ -237,8 +281,14 @@ void *reclaim_worker(void *arg)
     bool warning = task->warning;
 
     char maps_path[256], numa_path[256];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    snprintf(numa_path, sizeof(numa_path), "/proc/%d/numa_maps", pid);
+    if (snprintf_s(maps_path, sizeof(maps_path), sizeof(maps_path) - 1, "/proc/%d/maps", pid) < 0) {
+        LOG_ERR("Failed to format maps path for pid %d\n", pid);
+        goto out;
+    }
+    if (snprintf_s(numa_path, sizeof(numa_path), sizeof(numa_path) - 1, "/proc/%d/numa_maps", pid) < 0) {
+        LOG_ERR("Failed to format numa_maps path for pid %d\n", pid);
+        goto out;
+    }
 
     FILE *maps = fopen(maps_path, "r");
     if (!maps) {
@@ -260,7 +310,8 @@ void *reclaim_worker(void *arg)
             continue;
 
         unsigned long start, end, size;
-        sscanf(map_line, "%lx-%lx", &start, &end);
+        if (sscanf_s(map_line, "%lx-%lx", &start, &end) != 2)
+            continue;
         size = end - start;
 
         char numa_line[512];
@@ -269,7 +320,7 @@ void *reclaim_worker(void *arg)
         fseek(numa, 0, SEEK_SET);
         while (fgets(numa_line, sizeof(numa_line), numa)) {
             unsigned long vma_addr;
-            if (sscanf(numa_line, "%lx", &vma_addr) == 1) {
+            if (sscanf_s(numa_line, "%lx", &vma_addr) == 1) {
                 if (vma_addr >= start && vma_addr < end) {
                     if (vma_on_node(numa_line, node)) {
                         found_on_node = 1;
@@ -298,7 +349,10 @@ pid_t read_pid_from_file(const char *domain_name) {
     char pid_str[16];
     pid_t pid = 0;
 
-    snprintf(path, sizeof(path), "/var/run/libvirt/qemu/%s.pid", domain_name);
+    if (snprintf_s(path, sizeof(path), sizeof(path) - 1, "/var/run/libvirt/qemu/%s.pid", domain_name) < 0) {
+        LOG_ERR("snprintf_s failed for pid path of domain %s\n", domain_name);
+        return 0;
+    }
 
     FILE *f = fopen(path, "r");
     if (f) {
@@ -316,11 +370,14 @@ int get_vm_pids(pid_t *pids, int max) {
     int num, i, count = 0;
 
     conn = virConnectOpenReadOnly("qemu:///system");
-    if (!conn)
+    if (!conn) {
+        LOG_ERR("Failed to connect to libvirt\n");
         return 0;
+    }
 
     num = virConnectListAllDomains(conn, &domains, VIR_CONNECT_LIST_DOMAINS_ACTIVE);
     if (num < 0) {
+        LOG_ERR("Failed to list domains from libvirt\n");
         virConnectClose(conn);
         return 0;
     }
