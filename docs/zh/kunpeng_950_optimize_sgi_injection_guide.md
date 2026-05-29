@@ -176,4 +176,4 @@ uname -r
 ## 注意事项
 
 * 本特性仅影响KVM宿主机侧的SGI分发路径，不改变Guest可见行为，对Guest操作系统透明。
-* 当GICv4.1硬件IPIv（Direct SGI）启用时，Guest的SGI由硬件直接处理，不经过KVM软件路径，本优化不会生效。
+* 当GICv4.1硬件IPIv启用时，Guest的SGI由硬件直接处理，不经过KVM软件路径，本优化不会生效。
