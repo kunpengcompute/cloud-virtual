@@ -130,7 +130,7 @@ qemu需要获取以下12个补丁文件，并保持应用顺序不变。
     ```bash
     virsh edit <vm name>
     ```
-    参考如下示例配置虚拟机缓存信息：
+    参考如下示例配置虚拟机缓存信息（示例参数仅供参考，请以实际场景为准）：
     ```xml
         ...
         <devices>
@@ -148,21 +148,19 @@ qemu需要获取以下12个补丁文件，并保持应用顺序不变。
 
     参数说明：
     
-    | 参数 | 说明                                                                                    |
-    |--|---------------------------------------------------------------------------------------|
-    | cache | 缓存层级和类型，格式为lx[i/d]，x表示缓存层级，[i/d]表示指令缓存或数据缓存，不写表示统一缓存                                  |
-    | topology | 缓存绑定的处理器层级，可选thread、core、cluster、die、socket；同一层级上包含多个不同level的缓存时，表示它们之间存在next level关系 |
-    | size | 缓存大小（字节）                                                                              |
-    | sets | 缓存组数                                                                                  |
-    | associativity | 缓存关联度（ways数）                                                                          |
-    | line | 缓存行大小（字节）                                                                             |
+    | 参数 | 说明                                                                                    | 取值范围 |
+    |--|---------------------------------------------------------------------------------------|--------|
+    | cache | 缓存层级和类型，格式为lx[i/d]，x表示缓存层级，[i/d]表示指令缓存或数据缓存，不写表示统一缓存                                  | l1i、l1d、l1、l2、l3 |
+    | topology | 缓存绑定的处理器层级，同一层级上包含多个不同level的缓存时，表示它们之间存在next level关系 | thread、core、cluster、socket |
+    | size | 缓存大小（字节）                                                                              | 1 ~ 4294967295（4字节无符号整数） |
+    | sets | 缓存组数                                                                                  | 1 ~ 4294967295（4字节无符号整数） |
+    | associativity | 缓存关联度（ways数）                                                                          | 1 ~ 255（1字节无符号整数） |
+    | line | 缓存行大小（字节）                                                                             | 1 ~ 65535（2字节无符号整数） |
     
     注意事项：
-    - 输入的参数不完整时，部分信息按照鲲鹏950的物理缓存提供默认参数。
-    - cache参数为必选，其余参数为可选。
-    - die参数由于qemu不支持，目前die参数恒定设置为1，不可更改。
-    - 当cache设置为l1i和l1d时，不能将cache设置为l1；当cache设置为l1时，不能将cache设置为l1i和l1d。
-    - l1i、l1d、l1、l2和l3的topology参数和size参数推荐与服务器硬件参数一致。
+    - `<cacheinfo>`标签下的cache参数为必选，其余参数为可选。参数不完整时，缺失部分自动使用鲲鹏950的物理缓存默认值。
+    - `<cacheinfo>`标签下的topology参数不支持die（QEMU不支持die维度），写die时该条配置不生效。topology和size参数建议与服务器实际硬件参数一致。
+    - L1支持分别配置l1i和l1d，也可统一配置为l1，但l1与l1i/l1d互斥；L2和L3为统一缓存，不支持拆分。
 
 2. 启动虚拟机。
 
@@ -170,11 +168,61 @@ qemu需要获取以下12个补丁文件，并保持应用顺序不变。
     virsh start <vm name> --console
     ```
 
-3. 验证配置是否生效，若打印信息中出现Caches一栏，则表示配置成功。
+3. 验证配置是否生效。
+
+    进入虚拟机，先通过lscpu查看缓存概览，确认Caches一栏中显示的参数与XML配置一致。
 
     ```bash
     lscpu
     ```
+
+    如需进一步验证各参数细节，可通过sysfs逐项查看，查询到的值应与XML中`<cacheinfo>`配置的参数一致。以下以cpu0为例，实际可检查任意vCPU：
+
+    ```bash
+    # 查看所有缓存层级概览
+    ls /sys/devices/system/cpu/cpu0/cache/
+    ```
+
+    期望输出类似：
+
+    ```text
+    index0  index1  index2  index3
+    ```
+
+    逐项验证各缓存参数，以index0（L1数据缓存）为例：
+
+    ```bash
+    # 验证缓存层级和类型（L1数据缓存应为 level=1, type=Data）
+    cat /sys/devices/system/cpu/cpu0/cache/index0/level
+    cat /sys/devices/system/cpu/cpu0/cache/index0/type
+
+    # 验证缓存大小（对应<cacheinfo>的size参数，单位不同需注意）
+    cat /sys/devices/system/cpu/cpu0/cache/index0/size
+
+    # 验证缓存组数（对应sets参数）
+    cat /sys/devices/system/cpu/cpu0/cache/index0/number_of_sets
+
+    # 验证缓存关联度（对应associativity参数）
+    cat /sys/devices/system/cpu/cpu0/cache/index0/ways_of_associativity
+
+    # 验证缓存行大小（对应line参数）
+    cat /sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size
+
+    # 验证topology绑定层级（shared_cpu_list显示共享该缓存的CPU列表）
+    # topology=core时，同一core下的线程共享；topology=cluster时，同一cluster下的核共享
+    cat /sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list
+    ```
+
+    根据示例配置，各index的期望验证结果如下：
+
+    | index | level | type | size | number_of_sets | ways_of_associativity | coherency_line_size | topology |
+    |--|--|--|--|--|--|--|--|
+    | index0 | 1 | Data | 64K | 512 | 4 | 64 | core |
+    | index1 | 1 | Instruction | 128K | 512 | 4 | 64 | core |
+    | index2 | 2 | Unified | 1024K | 2048 | 8 | 64 | core |
+    | index3 | 3 | Unified | 23296K | 16384 | 19 | 64 | cluster |
+
+    注意：index与缓存的对应关系以虚拟机实际枚举顺序为准，不同平台可能不同。
 
 ## 注意事项
 

@@ -6,9 +6,7 @@
 
 本文介绍如何在鲲鹏950服务器中部署和使用SGI注入亲和性优化特性。
 
-在ARM64 KVM虚拟化中，虚拟机通过写ICC_SGI1R_EL1寄存器向目标vCPU发送SGI（Software Generated Interrupt，软件生成中断）。当Guest发送SGI时，KVM需要在宿主机侧根据目标亲和性（affinity）找到对应的vCPU，再将中断投递给它。
-
-原始实现中，`vgic_v3_dispatch_sgi`函数通过遍历VM中所有vCPU，逐个匹配MPIDR亲和性来查找目标vCPU，时间复杂度为O(n)。当vCPU数量较多时，每次SGI投递都需要全量遍历，成为性能瓶颈。
+在ARM64 KVM虚拟化中，虚拟机通过写ICC_SGI1R_EL1寄存器向目标vCPU发送SGI（Software Generated Interrupt，软件生成中断）。当Guest发送SGI时，KVM需要在宿主机侧根据亲和性信息计算目标MPID，再按照MPID遍历所有vCPU逐一匹配，时间复杂度为O(n)。当vCPU数量较多时，每次SGI投递都需要全量遍历，成为性能瓶颈。
 
 SGI注入亲和性优化特性通过在VM首次运行时预计算MPIDR到vCPU索引的压缩映射表（`kvm_mpidr_data`），将SGI分发路径从O(n)遍历优化为O(1)直接查找，显著降低SGI投递延迟。
 
@@ -26,9 +24,8 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 1. VM首次运行时，`kvm_init_mpidr_data`分析所有vCPU的MPIDR，构造压缩映射表。
 2. Guest写ICC_SGI1R_EL1触发SGI分发。
-3. KVM解析目标亲和性和目标CPU位图。
-4. 对位图中每个目标CPU，通过`kvm_mpidr_to_vcpu`直接查找目标vCPU（O(1)）。
-5. 调用`vgic_v3_queue_sgi`向目标vCPU投递中断。
+3. KVM根据亲和性信息计算目标MPID，通过映射表直接查找对应vCPU。
+4. 调用`vgic_v3_queue_sgi`向目标vCPU投递中断。
 
 ## 环境要求
 
@@ -42,10 +39,10 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 **软件要求**
 
-| 项目 | 版本或说明 |
-|--|--|
-| OS | `openEuler 2403 SP3` |
-| 内核源码基线 | `OLK-6.6 6.6.0-133.0.0` |
+| 项目 | 版本或说明                    |
+|--|--------------------------|
+| OS | `openEuler 2403 LTS SP3` |
+| 内核源码基线 | `OLK-6.6 6.6.0-135.0.0`  |
 
 ## 获取并合入SGI优化补丁
 
@@ -63,7 +60,7 @@ https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0
 
 ### 获取目标内核源码
 
-克隆openEuler内核源码并切换到`OLK-6.6`分支，确保源码包含tag 6.6.0-133.0.0：
+克隆openEuler内核源码并切换到`OLK-6.6`分支，确保源码包含tag 6.6.0-135.0.0：
 
 ```bash
 git clone https://gitcode.com/openeuler/kernel.git -b OLK-6.6 --depth=1
@@ -112,6 +109,12 @@ OLK-6.6
 git status --short
 ```
 
+### 编译config文件
+
+```bash
+make openeuler_defconfig
+```
+
 ### 编译RPM
 
 在内核源码根目录执行：
@@ -130,7 +133,13 @@ make binrpm-pkg -j$(nproc)
 sudo rpm -ivh <内核rpm名称> --force
 ```
 
-安装完成后，重启系统使新内核生效：
+安装完成后，确认已安装的内核：
+
+```bash
+rpm -qa | grep '^kernel' | sort
+```
+
+重启系统使新内核生效：
 
 ```bash
 sudo reboot
@@ -140,7 +149,6 @@ sudo reboot
 
 ```bash
 uname -r
-rpm -qa | grep '^kernel' | sort
 ```
 
 ## 使用SGI注入亲和性优化特性
@@ -168,6 +176,4 @@ rpm -qa | grep '^kernel' | sort
 ## 注意事项
 
 * 本特性仅影响KVM宿主机侧的SGI分发路径，不改变Guest可见行为，对Guest操作系统透明。
-* 单vCPU的VM不会构造映射表（无需优化），特性自动跳过。
-* 当vCPU的MPIDR亲和性分布导致映射表超过一页大小时，特性自动退化为原始遍历方式，不影响功能正确性。
-* 本特性与GICv4.1硬件SGI直通（Direct SGIs）特性正交，两者可同时使用。
+* 当GICv4.1硬件IPIv（Direct SGI）启用时，Guest的SGI由硬件直接处理，不经过KVM软件路径，本优化不会生效。
