@@ -16,6 +16,7 @@
 #include <numa.h>
 #include <memlink_sdk.h>
 #include <securec.h>
+#include <signal.h>
 
 #define LOW_WATERMARK (1.0 / 5.0)
 #define BOTTOM_SIZE (1.0 / 10.0)
@@ -25,16 +26,191 @@
 #define LOG_WARN(...) printf("[WARN] " __VA_ARGS__)
 #define LOG_ERR(...) printf("[ERROR] " __VA_ARGS__)
 
-typedef struct {
-    pid_t pid;
-    int node;
-    bool warning;
-} reclaim_task_t;
+static volatile bool g_stop = false;
 
 typedef struct {
     uint64_t addr;
-    size_t score;
+    uint64_t score;
 } PageScore;
+
+typedef enum {
+    PRESSURE_LOW,
+    PRESSURE_MEDIUM,
+    PRESSURE_HIGH,
+    PRESSURE_CRITICAL,
+} PressureLevel;
+
+typedef struct {
+    pid_t pid;
+    unsigned long memory_kb;
+    char name[128];
+} vm_info_t;
+
+typedef struct VMHeatInfo {
+    pid_t pid;
+    bool alive;
+    /* VM总页数 */
+    uint64_t total_pages;
+    /* 当前可回收页 */
+    uint64_t reclaimable_pages;
+    /* 热度值 [0,1] */
+    double heat_score;
+    /* 冷度值 [0,1] */
+    double cold_score;
+    /* 最近更新时间 */
+    uint64_t last_update_ns;
+    /* 正在回收计数 */
+    int in_reclaim;
+    pthread_mutex_t lock;
+    struct VMHeatInfo *next;
+
+} VMHeatInfo;
+
+typedef struct {
+    VMHeatInfo *head;
+    pthread_rwlock_t rwlock;
+    uint64_t sample_interval_s;
+    double ema_alpha;
+    int vm_count;
+} HeatManager;
+
+typedef struct {
+    int node;
+    uint64_t reclaim_pages;
+    VMHeatInfo *vm;
+} reclaim_task_t;
+
+static void signal_handler(int signo)
+{
+    g_stop = true;
+}
+
+
+
+static inline uint64_t monotonic_time_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static double ema_update(double old,
+                         double current,
+                         double alpha)
+{
+    return old * alpha + current * (1.0 - alpha);
+}
+
+void vm_heat_update(HeatManager *mgr,
+                    VMHeatInfo *vm)
+{
+    uint64_t now;
+    uint64_t delta_ns;
+    uint64_t accessed;
+    double current_heat;
+    int ret;
+
+    now = monotonic_time_ns();
+    pthread_mutex_lock(&vm->lock);
+    delta_ns = now - vm->last_update_ns;
+
+    if (!delta_ns) {
+        pthread_mutex_unlock(&vm->lock);
+        return;
+    }
+
+    /*
+     * 查询接口：
+     * 返回delta访问页数
+     * 并清零
+     */
+    ret = QueryAndClearPageAccessedCount(vm->pid, &accessed);
+    if (ret) {
+        LOG_ERR("QueryAndClearPageAccessedCount failed for pid %d: %d\n", vm->pid, ret);
+        pthread_mutex_unlock(&vm->lock);
+        return;
+    }
+    /*
+     * 采样窗口内被访问过的页面比例
+     */
+    current_heat = vm->total_pages ?
+        (double)accessed / vm->total_pages : 0;
+    if (current_heat > 1.0)
+        current_heat = 1.0;
+
+    /*
+     * EMA平滑
+     */
+    vm->heat_score = ema_update(vm->heat_score, current_heat, mgr->ema_alpha);
+    vm->cold_score = 1.0 - vm->heat_score;
+    vm->reclaimable_pages = vm->total_pages * vm->cold_score;
+    vm->last_update_ns = now;
+    pthread_mutex_unlock(&vm->lock);
+}
+
+static double pressure_factor(PressureLevel level)
+{
+    switch (level) {
+    case PRESSURE_LOW:
+        return 0.3;
+    case PRESSURE_MEDIUM:
+        return 0.5;
+    case PRESSURE_HIGH:
+        return 0.7;
+    case PRESSURE_CRITICAL:
+        return 0.9;
+    default:
+        return 0.1;
+    }
+}
+
+static const char *pressure_name(PressureLevel level)
+{
+    switch (level) {
+    case PRESSURE_LOW:    return "LOW";
+    case PRESSURE_MEDIUM: return "MEDIUM";
+    case PRESSURE_HIGH:   return "HIGH";
+    case PRESSURE_CRITICAL: return "CRITICAL";
+    default:              return "UNKNOWN";
+    }
+}
+
+uint64_t vm_calculate_reclaim_pages(VMHeatInfo *vm,
+                                    PressureLevel pressure)
+{
+    uint64_t reclaim_pages;
+    uint64_t max_reclaim;
+    pthread_mutex_lock(&vm->lock);
+
+    reclaim_pages = vm->reclaimable_pages * pressure_factor(pressure);
+    max_reclaim = vm->total_pages - vm->total_pages / 5;
+
+    if (reclaim_pages > max_reclaim)
+        reclaim_pages = max_reclaim;
+
+    pthread_mutex_unlock(&vm->lock);
+    return reclaim_pages;
+}
+
+VMHeatInfo *select_coldest_vm(HeatManager *mgr)
+{
+    VMHeatInfo *best = NULL;
+    double best_cold = 0;
+    pthread_rwlock_rdlock(&mgr->rwlock);
+    VMHeatInfo *vm = mgr->head;
+
+    while (vm) {
+        pthread_mutex_lock(&vm->lock);
+        if (vm->cold_score > best_cold) {
+            best = vm;
+            best_cold = vm->cold_score;
+        }
+        pthread_mutex_unlock(&vm->lock);
+        vm = vm->next;
+    }
+    pthread_rwlock_unlock(&mgr->rwlock);
+    return best;
+}
 
 /* 大顶堆 反向排序 */
 int cmp(const void *a, const void *b)
@@ -42,7 +218,9 @@ int cmp(const void *a, const void *b)
     PageScore *pa = (PageScore *)a;
     PageScore *pb = (PageScore *)b;
 
-    return pb->score - pa->score;
+    if (pa->score < pb->score) return 1;
+    if (pa->score > pb->score) return -1;
+    return 0;
 }
 
 /*
@@ -58,14 +236,12 @@ int cmp(const void *a, const void *b)
  * Batching: Kernel has ~8MB kmalloc limit. We batch to stay well under it.
  * Each address: "0x%lx\n" ~ 20 bytes, so 1000 addresses ~ 20KB
  */
-int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
+int trigger_swap_multi(void **addrs, uint64_t count, int fd, int pid, uint64_t reclaim_pages)
 {
     /* Process in batches of 1000 to stay well under 8MB kernel limit */
     const int BATCH_SIZE = 1000;
-    int processed = 0;
-    int N = count / 4;
-    if (warning)
-        N = count;
+    uint64_t processed = 0;
+    uint64_t N = reclaim_pages;
 
     if (fd < 0) {
         LOG_ERR("Cannot open swap_pages: %s\n", strerror(errno));
@@ -77,17 +253,12 @@ int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
         LOG_ERR("Failed to allocate memory for topn\n");
         return -1;
     }
-    int size = 0;
+    uint64_t size = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (uint64_t i = 0; i < count; i++) {
         PageScore ps;
         ps.addr = (uint64_t)addrs[i];
 
-        if (warning) {
-            if (size < N)
-                topn[size++] = ps;
-            continue;
-        }
         QueryPageScore(ps.addr, pid, &ps.score);
 
         if (size < N) {
@@ -108,7 +279,7 @@ int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
         int batch_count = 0;
 
         /* Build batch */
-        for (int i = processed; i < N && batch_count < BATCH_SIZE; i++, batch_count++) {
+        for (uint64_t i = processed; i < N && batch_count < BATCH_SIZE; i++, batch_count++) {
             int sret = snprintf_s(buf + len, sizeof(buf) - len, sizeof(buf) - len, "0x%lx\n", (uintptr_t)topn[i].addr);
             if (sret < 0) {
                 LOG_ERR("snprintf_s failed in batch build\n");
@@ -131,12 +302,12 @@ int trigger_swap_multi(void **addrs, int count, int fd, int pid, bool warning)
     }
 
     free(topn);
-    LOG_INFO("Swap trigger sent for %d pages\n", N);
+    LOG_INFO("Swap trigger sent for %lu pages\n", N);
     return 0;
 }
 
 /* reclaim function */
-int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool warning)
+int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, uint64_t reclaim_pages)
 {
     char path[256];
     if (snprintf_s(path, sizeof(path), sizeof(path) - 1, "/proc/%d/swap_pages", pid) < 0) {
@@ -145,13 +316,12 @@ int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool wa
     }
 
     int fd = open(path, O_WRONLY);
-
     if (fd < 0) {
         LOG_ERR("Failed to open /proc/%d/swap_pages: %s\n", pid, strerror(errno));
         return -1;
     }
 
-    int num_pages = size / HUGEPAGE_SIZE;
+    uint64_t num_pages = size / HUGEPAGE_SIZE;
     void **addrs = malloc(num_pages * sizeof(void*));
     if (!addrs) {
         LOG_ERR("Failed to allocate memory for addrs\n");
@@ -159,11 +329,12 @@ int reclaim_hugepage(pid_t pid, unsigned long start, unsigned long size, bool wa
         return -1;
     }
 
-    for (int i = 0; i < num_pages; i++) {
+    for (uint64_t i = 0; i < num_pages; i++) {
         addrs[i] = (void*)((uintptr_t)start + i * HUGEPAGE_SIZE);
     }
 
-    int ret = trigger_swap_multi(addrs, num_pages, fd, pid, warning);
+    int ret = trigger_swap_multi(addrs, num_pages, fd, pid,
+        reclaim_pages < num_pages ? reclaim_pages : num_pages);
     if (ret != 0) {
         LOG_ERR("Failed to trigger swap for pid %d\n", pid);
     }
@@ -276,9 +447,9 @@ int vma_on_node(const char *line, int node)
 void *reclaim_worker(void *arg)
 {
     reclaim_task_t *task = (reclaim_task_t *)arg;
-    pid_t pid = task->pid;
+    pid_t pid = task->vm->pid;
     int node = task->node;
-    bool warning = task->warning;
+    uint64_t reclaim_pages = task->reclaim_pages;
 
     char maps_path[256], numa_path[256];
     if (snprintf_s(maps_path, sizeof(maps_path), sizeof(maps_path) - 1, "/proc/%d/maps", pid) < 0) {
@@ -330,15 +501,17 @@ void *reclaim_worker(void *arg)
             }
         }
 
-        if (found_on_node) {
-            reclaim_hugepage(pid, start, size, warning);
-        }
+        if (found_on_node)
+            reclaim_hugepage(pid, start, size, reclaim_pages);
     }
 
     fclose(maps);
     fclose(numa);
 
 out:
+    pthread_mutex_lock(&task->vm->lock);
+    task->vm->in_reclaim--;
+    pthread_mutex_unlock(&task->vm->lock);
     free(task);
     return NULL;
 }
@@ -364,7 +537,7 @@ pid_t read_pid_from_file(const char *domain_name) {
     return pid;
 }
 
-int get_vm_pids(pid_t *pids, int max) {
+int get_vm_infos(vm_info_t *vms, int max) {
     virConnectPtr conn;
     virDomainPtr *domains;
     int num, i, count = 0;
@@ -385,6 +558,7 @@ int get_vm_pids(pid_t *pids, int max) {
     for (i = 0; i < num && count < max; i++) {
         char *meta = virDomainGetMetadata(domains[i], VIR_DOMAIN_METADATA_ELEMENT, "http://reclaim.io", 0);
         const char *name = virDomainGetName(domains[i]);
+        virDomainInfo info;
 
         // 检查是否包含禁止回收标签
         int skip = 0;
@@ -401,10 +575,22 @@ int get_vm_pids(pid_t *pids, int max) {
             continue;
         }
 
+        if (virDomainGetInfo(domains[i], &info) < 0) {
+            virDomainFree(domains[i]);
+            continue;
+        }
+
         if (name) {
             pid_t pid = read_pid_from_file(name);
             if (pid > 0) {
-                pids[count++] = pid;
+                vms[count].pid = pid;
+                vms[count].memory_kb = info.memory;
+                if (snprintf_s(vms[count].name, sizeof(vms[count].name), sizeof(vms[count].name) - 1, "%s", name) < 0) {
+                    LOG_ERR("snprintf_s failed for vm name %s\n", name);
+                    virDomainFree(domains[i]);
+                    continue;
+                }
+                count++;
             }
         }
         virDomainFree(domains[i]);
@@ -415,8 +601,120 @@ int get_vm_pids(pid_t *pids, int max) {
     return count;
 }
 
+void heat_manager_sync_vms(HeatManager *mgr)
+{
+    vm_info_t vm_infos[128];
+    int vm_count = get_vm_infos(vm_infos, 128);
+    pthread_rwlock_wrlock(&mgr->rwlock);
+
+    /*
+     * 第一阶段：
+     * 全部标记为dead
+     */
+    VMHeatInfo *vm = mgr->head;
+
+    while (vm) {
+        vm->alive = false;
+        vm = vm->next;
+    }
+
+    /*
+     * 第二阶段：
+     * 扫描当前VM
+     */
+    for (int i = 0; i < vm_count; i++) {
+        pid_t pid = vm_infos[i].pid;
+        VMHeatInfo *found = NULL;
+        vm = mgr->head;
+        while (vm) {
+            if (vm->pid == pid) {
+                found = vm;
+                break;
+            }
+
+            vm = vm->next;
+        }
+
+        /*
+         * 已存在
+         */
+        if (found) {
+            found->alive = true;
+            continue;
+        }
+
+        /*
+         * 新VM
+         */
+        VMHeatInfo *new_vm = calloc(1, sizeof(VMHeatInfo));
+        new_vm->pid = pid;
+        new_vm->alive = true;
+        new_vm->heat_score = 0.5;
+        new_vm->cold_score = 0.5;
+        new_vm->total_pages = vm_infos[i].memory_kb / 2048;
+        new_vm->reclaimable_pages = new_vm->total_pages * new_vm->cold_score;
+        new_vm->last_update_ns = monotonic_time_ns();
+        pthread_mutex_init(&new_vm->lock, NULL);
+        new_vm->next = mgr->head;
+        mgr->head = new_vm;
+        mgr->vm_count++;
+        LOG_INFO("add vm pid=%d\n", pid);
+    }
+
+    /*
+     * 第三阶段：
+     * 删除dead VM
+     */
+    VMHeatInfo **pprev = &mgr->head;
+    vm = mgr->head;
+    while (vm) {
+        if (!vm->alive) {
+            pthread_mutex_lock(&vm->lock);
+            int in_use = (vm->in_reclaim > 0);
+            pthread_mutex_unlock(&vm->lock);
+
+            if (in_use)
+                goto next_dead;
+
+            LOG_INFO("remove vm pid=%d\n", vm->pid);
+            *pprev = vm->next;
+            pthread_mutex_destroy(&vm->lock);
+            free(vm);
+            mgr->vm_count--;
+            vm = *pprev;
+            continue;
+        }
+next_dead:
+        pprev = &vm->next;
+        vm = vm->next;
+    }
+    pthread_rwlock_unlock(&mgr->rwlock);
+}
+
+void *heat_sampling_thread(void *arg)
+{
+    HeatManager *mgr = arg;
+    while (!g_stop) {
+        /*
+         * 动态同步VM
+         */
+        heat_manager_sync_vms(mgr);
+        pthread_rwlock_rdlock(&mgr->rwlock);
+        VMHeatInfo *vm = mgr->head;
+        while (vm) {
+            vm_heat_update(mgr, vm);
+            vm = vm->next;
+        }
+        pthread_rwlock_unlock(&mgr->rwlock);
+        sleep(mgr->sample_interval_s);
+    }
+
+    LOG_INFO("heat thread exit\n");
+    return NULL;
+}
+
 /* Monitor and reclaim NUMA hugepages */
-void monitor_and_reclaim()
+void monitor_and_reclaim(HeatManager *mgr)
 {
     if (numa_available() < 0) {
         LOG_ERR("System does not support NUMA\n");
@@ -424,8 +722,9 @@ void monitor_and_reclaim()
     }
 
     int numa_nodes = numa_num_configured_nodes();
+    int *consecutive = calloc(numa_nodes, sizeof(int));
 
-    while (1) {
+    while (!g_stop) {
         for (int node = 0; node < numa_nodes; node++) {
             unsigned long nr_pages = get_node_nr_hugepages(node);
             if (!nr_pages) {
@@ -434,57 +733,141 @@ void monitor_and_reclaim()
             }
 
             unsigned long free_pages = get_node_free_hugepages(node);
+            double free_ratio = (double)free_pages / nr_pages;
 
-            if ((double)free_pages / nr_pages >= LOW_WATERMARK)
+            if (free_ratio >= LOW_WATERMARK) {
+                consecutive[node] = 0;
                 continue;
+            }
 
-            if ((double)free_pages / nr_pages <= BOTTOM_SIZE)
-                LOG_WARN("Node %d low hugepage: %lu MB (free/total: %lu/%lu)\n",
-                   node, free_pages * 2, free_pages, nr_pages);
-            else
-                LOG_INFO("Node %d hugepage: %lu MB (free/total: %lu/%lu)\n",
-                   node, free_pages * 2, free_pages, nr_pages);
+            consecutive[node]++;
 
-            pid_t vm_pids[128];
-            int vm_count = get_vm_pids(vm_pids, 128);
+            /*
+             * 回收可能失败，两次算一轮，每两轮压力上升一级：
+             *  4次(2轮)  → MEDIUM
+             *  8次(4轮)  → HIGH
+             *  12次(6轮) → CRITICAL
+             *
+             * 低于10%时快速升级：
+             *  1-3次 → HIGH,  ≥4次 → CRITICAL
+             */
+            PressureLevel pressure;
+            if (free_ratio <= BOTTOM_SIZE) {
+                pressure = (consecutive[node] >= 4) ? PRESSURE_CRITICAL : PRESSURE_HIGH;
+            } else {
+                if (consecutive[node] >= 12)      pressure = PRESSURE_CRITICAL;
+                else if (consecutive[node] >= 8)  pressure = PRESSURE_HIGH;
+                else if (consecutive[node] >= 4)  pressure = PRESSURE_MEDIUM;
+                else                              pressure = PRESSURE_LOW;
+            }
+
+            LOG_INFO("Node %d free/total: %lu/%lu, pressure: %s, count: %d\n",
+               node, free_pages, nr_pages, pressure_name(pressure), consecutive[node]);
 
             pthread_t tids[128];
             int tcount = 0;
+            VMHeatInfo *vm = mgr->head;
+            pthread_rwlock_rdlock(&mgr->rwlock);
 
-            for (int i = 0; i < vm_count; i++) {
-                pid_t pid = vm_pids[i];
+            while (vm) {
+                pid_t pid = vm->pid;
 
-                if (!is_process_on_node(pid, node))
+                if (!is_process_on_node(pid, node)) {
+                    vm = vm->next;
                     continue;
+                }
+
+                pthread_mutex_lock(&vm->lock);
+                int skip = (vm->cold_score < 0.1);
+                if (!skip)
+                    vm->in_reclaim++;
+                pthread_mutex_unlock(&vm->lock);
+
+                if (skip) {
+                    vm = vm->next;
+                    continue;
+                }
 
                 reclaim_task_t *task = malloc(sizeof(*task));
-                task->pid = pid;
+                task->vm = vm;
                 task->node = node;
-                if ((double)free_pages / nr_pages <= BOTTOM_SIZE)
-                    task->warning = true;
-                else
-                    task->warning = false;
+                task->reclaim_pages = vm_calculate_reclaim_pages(vm, pressure);
+
+                if (!task->reclaim_pages) {
+                    pthread_mutex_lock(&vm->lock);
+                    vm->in_reclaim--;
+                    pthread_mutex_unlock(&vm->lock);
+                    free(task);
+                    vm = vm->next;
+                    continue;
+                }
 
                 if (pthread_create(&tids[tcount], NULL,
                                    reclaim_worker, task) == 0) {
                     tcount++;
                 } else {
+                    pthread_mutex_lock(&vm->lock);
+                    vm->in_reclaim--;
+                    pthread_mutex_unlock(&vm->lock);
                     free(task);
                 }
+                vm = vm->next;
             }
+            pthread_rwlock_unlock(&mgr->rwlock);
 
             for (int i = 0; i < tcount; i++) {
                 pthread_join(tids[i], NULL);
             }
         }
-
-        sleep(3);
+        /* 每5s触发一次回收 */
+        sleep(5);
     }
+
+    LOG_INFO("monitor loop exit\n");
+    free(consecutive);
+}
+
+void heat_manager_destroy(HeatManager *mgr)
+{
+    pthread_rwlock_wrlock(&mgr->rwlock);
+    VMHeatInfo *vm = mgr->head;
+
+    while (vm) {
+        VMHeatInfo *next = vm->next;
+        pthread_mutex_destroy(&vm->lock);
+        free(vm);
+        vm = next;
+    }
+
+    mgr->head = NULL;
+    pthread_rwlock_unlock(&mgr->rwlock);
 }
 
 int main()
 {
     LOG_INFO("Starting NUMA hugepage reclaim (libvirt mode)...\n");
-    monitor_and_reclaim();
+    pthread_t heat_tid;
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    HeatManager mgr = {0};
+    pthread_rwlock_init(&mgr.rwlock, NULL);
+    /* 热度采样间隔，单位：秒 */
+    mgr.sample_interval_s = 10;
+    /* EMA平滑系数 (0~1)，越大越平滑，越小越敏感 */
+    mgr.ema_alpha = 0.7;
+
+    if (pthread_create(&heat_tid, NULL, heat_sampling_thread, &mgr)) {
+        LOG_ERR("create heat thread failed\n");
+        return -1;
+    }
+    monitor_and_reclaim(&mgr);
+    pthread_join(heat_tid, NULL);
+
+    /*
+     * 清理所有VM
+     */
+    heat_manager_destroy(&mgr);
+    pthread_rwlock_destroy(&mgr.rwlock);
+    LOG_INFO("daemon exit\n");
     return 0;
 }
