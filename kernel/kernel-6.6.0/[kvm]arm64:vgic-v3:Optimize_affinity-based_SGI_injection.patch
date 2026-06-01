@@ -156,7 +156,7 @@ index 2c982969cc30..d646afc2f0ba 100644
  		if (mpidr == kvm_vcpu_get_mpidr_aff(vcpu))
  			return vcpu;
 diff --git a/arch/arm64/kvm/vgic/vgic-mmio-v3.c b/arch/arm64/kvm/vgic/vgic-mmio-v3.c
-index 623160d51e54..5a4af53f7d79 100644
+index 623160d51e54..54c6e9d9cad8 100644
 --- a/arch/arm64/kvm/vgic/vgic-mmio-v3.c
 +++ b/arch/arm64/kvm/vgic/vgic-mmio-v3.c
 @@ -1128,35 +1128,6 @@ int vgic_v3_has_attr_regs(struct kvm_device *dev, struct kvm_device_attr *attr)
@@ -252,8 +252,7 @@ index 623160d51e54..5a4af53f7d79 100644
 -	mpidr = SGI_AFFINITY_LEVEL(reg, 3);
 -	mpidr |= SGI_AFFINITY_LEVEL(reg, 2);
 -	mpidr |= SGI_AFFINITY_LEVEL(reg, 1);
-+	u32 sgi, aff0;
- 
+-
 -	/*
 -	 * We iterate over all VCPUs to find the MPIDRs matching the request.
 -	 * If we have handled one CPU, we clear its bit to detect early
@@ -262,8 +261,7 @@ index 623160d51e54..5a4af53f7d79 100644
 -	 */
 -	kvm_for_each_vcpu(c, c_vcpu, kvm) {
 -		struct vgic_irq *irq;
-+	sgi = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, reg);
- 
+-
 -		/* Exit early if we have dealt with all requested CPUs */
 -		if (!broadcast && target_cpus == 0)
 -			break;
@@ -271,10 +269,13 @@ index 623160d51e54..5a4af53f7d79 100644
 -		/* Don't signal the calling VCPU */
 -		if (broadcast && c == vcpu_id)
 -			continue;
--
++	u32 sgi, aff0;
++	unsigned long c;
+ 
 -		if (!broadcast) {
 -			int level0;
--
++	sgi = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, reg);
+ 
 -			level0 = match_mpidr(mpidr, target_cpus, c_vcpu);
 -			if (level0 == -1)
 +	/* Broadcast */
@@ -316,7 +317,6 @@ index 623160d51e54..5a4af53f7d79 100644
 -		} else {
 -			raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
 -		}
-+	unsigned long c;
 +	mpidr = SGI_AFFINITY_LEVEL(reg, 3);
 +	mpidr |= SGI_AFFINITY_LEVEL(reg, 2);
 +	mpidr |= SGI_AFFINITY_LEVEL(reg, 1);
