@@ -2,7 +2,7 @@
 
 ## 功能介绍
 
-本功能通过虚拟机用户设置虚拟机缓存信息，向虚拟机中透传相信缓存信息，使得虚拟机OS内核能够正确识别CCL级别调度域，改善内核调度效率。
+本功能通过虚拟机用户设置虚拟机缓存信息，向虚拟机中透传详细缓存信息，使得虚拟机OS内核能够正确识别CCL级别调度域，改善内核调度效率。
 
 ## 运行环境
 
@@ -29,8 +29,8 @@
 
     | 项目 | 补丁链接 |
     |--|--|
-    | qemu | [https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0) |
-    | libvirt | [https://gitcode.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0](https://gitcode.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0) |
+    | qemu | [获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0) |
+    | libvirt | [获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0) |
 
 2. libvirt需要获取以下11个补丁文件，并保持应用顺序不变。
 
@@ -146,7 +146,7 @@
         ...
     ```
 
-    参数说明。
+    **表1** 参数说明
     
     | 参数 | 说明                                                                                    | 取值范围 |
     |--|---------------------------------------------------------------------------------------|--------|
@@ -157,7 +157,7 @@
     | associativity | 缓存关联度（ways数）                                                                          | 1 ~ 255（1字节无符号整数） |
     | line | 缓存行大小（字节）                                                                             | 1 ~ 65535（2字节无符号整数） |
     
-    注意事项。
+    注意事项：
     - `<cacheinfo>`标签下的cache参数为必选，其余参数为可选。参数不完整时，缺失部分自动使用鲲鹏950的物理缓存默认值。
     - `<cacheinfo>`标签下的topology参数不支持die（QEMU不支持die维度），写die时该条配置不生效。topology和size参数建议与服务器实际硬件参数一致。
     - L1支持分别配置l1i和l1d，也可统一配置为l1，但l1与l1i/l1d互斥；L2和L3为统一缓存，不支持拆分。
