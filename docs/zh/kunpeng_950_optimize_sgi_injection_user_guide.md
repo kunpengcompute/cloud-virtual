@@ -20,7 +20,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 | 快速查找（`kvm_mpidr_index` / `kvm_mpidr_to_vcpu`） | 利用压缩映射表，将MPIDR亲和性直接转换为vCPU索引，无需遍历。 |
 | SGI分发路径优化（`vgic_v3_dispatch_sgi`） | 重写SGI分发逻辑，将原来的全量遍历改为按目标位图逐个直接查找，并提取`vgic_v3_queue_sgi`辅助函数。 |
 
-典型流程如下：
+典型流程如下。
 
 1. VM首次运行时，`kvm_init_mpidr_data`分析所有vCPU的MPIDR，构造压缩映射表。
 2. Guest写ICC_SGI1R_EL1触发SGI分发。
@@ -48,35 +48,35 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 ### 获取补丁
 
-SGI优化补丁获取链接如下：
+1. SGI优化补丁获取链接如下。
 
-```text
-https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0
-```
+   ```text
+   https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0
+   ```
 
-需要获取以下补丁文件：
+2. 需要获取以下补丁文件。
 
-1. `[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch`
+   `[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch`
 
 ### 获取目标内核源码
 
-克隆openEuler内核源码并切换到`OLK-6.6`分支，确保源码包含tag 6.6.0-135.0.0：
+1. 克隆openEuler内核源码并切换到`OLK-6.6`分支，确保源码包含tag 6.6.0-135.0.0。
 
-```bash
-git clone https://gitcode.com/openeuler/kernel.git -b OLK-6.6 --depth=1
-cd kernel
-git branch --show-current
-```
+   ```bash
+   git clone https://gitcode.com/openeuler/kernel.git -b OLK-6.6 --depth=1
+   cd kernel
+   git branch --show-current
+   ```
 
-期望输出：
+2. 期望输出。
 
-```text
-OLK-6.6
-```
+   ```text
+   OLK-6.6
+   ```
 
 ### 合入补丁
 
-1. 合入补丁前，建议确认源码目录干净：
+1. 合入补丁前，建议确认源码目录干净。
 
    ```bash
    git status --short
@@ -84,14 +84,14 @@ OLK-6.6
 
     若命令没有输出，表示当前工作区没有未提交修改。
 
-2. 在内核源码根目录执行以下命令，按邮件补丁流合入SGI优化补丁：
+2. 在内核源码根目录执行以下命令，按邮件补丁流合入SGI优化补丁。
 
    ```bash
    git am --reject ~/sgi-patch/[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch
    git log --oneline -n 1
    ```
 
-   期望最新一条提交类似如下：
+   期望最新一条提交类似如下。
 
    ```text
    <newest> KVM: arm64: vgic-v3: Optimize affinity-based SGI injection
@@ -101,9 +101,7 @@ OLK-6.6
 
 ### 编译前准备
 
-开始编译前，请确保系统已安装openEuler内核RPM构建依赖，且构建目录有足够空间保存源码、中间文件和RPM包。
-
-可再次确认当前源码状态：
+开始编译前，请确保系统已安装openEuler内核RPM构建依赖，且构建目录有足够空间保存源码、中间文件和RPM包。可再次确认当前源码状态。
 
 ```bash
 git status --short
@@ -111,45 +109,44 @@ git status --short
 
 ### 编译config文件
 
+使用openEuler默认内核配置生成编译所需的.config文件。
+
 ```bash
 make openeuler_defconfig
 ```
 
 ### 编译RPM
-
-在内核源码根目录执行：
+在内核源码根目录执行。构建时间与服务器配置、内核配置和并发数有关。构建完成后，RPM包通常生成在源码目录的上一级目录。
 
 ```bash
 make binrpm-pkg -j$(nproc)
 ```
 
-构建时间与服务器配置、内核配置和并发数有关。构建完成后，RPM包通常生成在源码目录的上一级目录。
-
 ### 安装RPM
 
-根据实际生成的RPM文件名安装新内核包。以下命令仅为示例，请在执行前确认内核RPM包是本次构建产物：
+1. 根据实际生成的RPM文件名安装新内核包。以下命令仅为示例，请在执行前确认内核RPM包是本次构建产物。
 
-```bash
-sudo rpm -ivh <内核rpm名称> --force
-```
+   ```bash
+   sudo rpm -ivh <内核rpm名称> --force
+   ```
 
-安装完成后，确认已安装的内核：
+2. 安装完成后，确认已安装的内核。
 
-```bash
-rpm -qa | grep '^kernel' | sort
-```
+   ```bash
+   rpm -qa | grep '^kernel' | sort
+   ```
 
-重启系统使新内核生效：
+3. 重启系统使新内核生效。
 
-```bash
-sudo reboot
-```
+   ```bash
+   sudo reboot
+   ```
 
-系统重启后，确认当前运行的内核版本已经切换到新安装版本：
+4. 系统重启后，确认当前运行的内核版本已经切换到新安装版本。
 
-```bash
-uname -r
-```
+   ```bash
+   uname -r
+   ```
 
 ## 使用SGI注入亲和性优化特性
 
