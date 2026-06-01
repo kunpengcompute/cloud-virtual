@@ -47,7 +47,7 @@
 
 安装编译依赖。
 ```bash
-yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build autoconf automake libtool patch libvirt-devel
+yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build autoconf automake libtool patch libvirt-devel libboundscheck
 ```
 
 ### 获取内核源码与patch
@@ -60,7 +60,7 @@ cd kernel
 2. 获取ZRAM支持KAEpatch。
 ```bash
 cd /home/
-git clone https://gitcode.com/lucky1e/cloud-virtual.git
+git clone https://gitcode.com/boostkit/cloud-virtual.git
 ```
 3. 应用ZRAM支持KAEpatch。
 ```bash
@@ -150,13 +150,13 @@ cd /root/rpmbuild/RPMS/aarch64/;rpm -ivh memlinkd-*
 
 1. 获取reclaim源码。
 ```bash
-git clone https://gitcode.com/lucky1e/cloud-virtual.git
+git clone https://gitcode.com/boostkit/cloud-virtual.git
 ```
 2. 编译源码。
 
 ```bash
 cd cloud-virtual/tools/
-gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk
+gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk -lboundscheck
 ```
 
 ## 安装软件
