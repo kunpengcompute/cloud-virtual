@@ -130,14 +130,29 @@
     ```bash
     virsh edit <vm name>
     ```
-    参考如下示例配置虚拟机缓存信息（示例参数仅供参考，请以实际场景为准）。
+    鲲鹏920新型号处理器大规格虚拟机参考如下示例配置缓存信息（示例参数仅供参考，请以实际场景为准）。
     ```xml
         ...
         <devices>
           <emulator>"使用之前编译好的qemu-system-aarch64文件路径"</emulator>
         </devices>
         <cpu mode='host-passthrough' migratable='off'>
-          <topology sockets='2' dies='1' clusters='2' cores='8' threads='2'/>
+          <topology sockets='2' dies='1' clusters='10' cores='4' threads='2'/>
+          <cacheinfo cache='l1i' topology='core' size='65536' sets='256' associativity='4' line='64'/>
+          <cacheinfo cache='l1d' topology='core' size='65536' sets='256' associativity='4' line='64'/>
+          <cacheinfo cache='l2' topology='core' size='1310720' sets='2048' associativity='10' line='64'/>
+          <cacheinfo cache='l3' topology='socket' size='73400320' sets='2048' associativity='28' line='128'/>
+        </cpu>
+        ...
+    ```
+    鲲鹏950处理器大规格虚拟机参考如下示例配置缓存信息（示例参数仅供参考，请以实际场景为准）。
+    ```xml
+        ...
+        <devices>
+          <emulator>"使用之前编译好的qemu-system-aarch64文件路径"</emulator>
+        </devices>
+        <cpu mode='host-passthrough' migratable='off'>
+          <topology sockets='2' dies='1' clusters='6' cores='8' threads='2'/>
           <cacheinfo cache='l1i' topology='core' size='131072' sets='512' associativity='4' line='64'/>
           <cacheinfo cache='l1d' topology='core' size='65536' sets='256' associativity='4' line='64'/>
           <cacheinfo cache='l2' topology='core' size='1048576' sets='2048' associativity='8' line='64'/>
@@ -145,7 +160,6 @@
         </cpu>
         ...
     ```
-
     **表1** 参数说明
     
     | 参数 | 说明                                                                                    | 取值范围 |
@@ -213,14 +227,25 @@
     cat /sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list
     ```
 
-    根据示例配置，各index的期望验证结果如下。
+    根据示例配置，以下分别为鲲鹏920新型号和鲲鹏950处理器cpu0各index的期望验证结果。shared_cpu_list与topology的对应关系为：topology=core时shared_cpu_list为同一core下的线程，topology=cluster时shared_cpu_list为同一cluster下的所有CPU，topology=socket时shared_cpu_list为同一socket下的所有CPU。
 
-    | index | level | type | size | number_of_sets | ways_of_associativity | coherency_line_size | topology |
+    鲲鹏920新型号处理器。
+
+    | index | level | type | size | number_of_sets | ways_of_associativity | coherency_line_size | shared_cpu_list |
     |--|--|--|--|--|--|--|--|
-    | index0 | 1 | Data | 64K | 512 | 4 | 64 | core |
-    | index1 | 1 | Instruction | 128K | 512 | 4 | 64 | core |
-    | index2 | 2 | Unified | 1024K | 2048 | 8 | 64 | core |
-    | index3 | 3 | Unified | 23296K | 16384 | 19 | 64 | cluster |
+    | index0 | 1 | Data | 64K | 256 | 4 | 64 | 0-1 |
+    | index1 | 1 | Instruction | 64K | 256 | 4 | 64 | 0-1 |
+    | index2 | 2 | Unified | 1280K | 2048 | 10 | 64 | 0-1 |
+    | index3 | 3 | Unified | 71680K | 2048 | 28 | 128 | 0-79 |
+
+    鲲鹏950处理器。
+
+    | index | level | type | size | number_of_sets | ways_of_associativity | coherency_line_size | shared_cpu_list |
+    |--|--|--|--|--|--|--|--|
+    | index0 | 1 | Data | 64K | 256 | 4 | 64 | 0-1 |
+    | index1 | 1 | Instruction | 128K | 512 | 4 | 64 | 0-1 |
+    | index2 | 2 | Unified | 1024K | 2048 | 8 | 64 | 0-1 |
+    | index3 | 3 | Unified | 23296K | 16384 | 19 | 64 | 0-15 |
 
     注意：index与缓存的对应关系以虚拟机实际枚举顺序为准，不同平台可能不同。
 
