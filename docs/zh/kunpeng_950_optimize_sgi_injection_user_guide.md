@@ -87,7 +87,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 2. 在内核源码根目录执行以下命令，合入SGI优化补丁。
 
    ```bash
-   git apply ~/sgi-patch/[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch
+   git apply -p1 ~/sgi-patch/[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch
    git log --oneline -n 1
    ```
 
