@@ -236,7 +236,16 @@ echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepa
 
 ### 启动memlink工具
 
-启动memlink工具。
+1. 修改memlink配置，修改部分配置项如下。
+```bash
+vim /etc/memlinkd.conf
+```
+```text
+page_score_enable=1
+page_score_poll_cycle_sec=5
+```
+
+2. 启动memlink工具。
 
 ```bash
 modprobe etmem_scan
