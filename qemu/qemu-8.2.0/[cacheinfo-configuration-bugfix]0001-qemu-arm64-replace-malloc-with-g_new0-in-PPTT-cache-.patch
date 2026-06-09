@@ -1,0 +1,50 @@
+From 5e4a7cd27c5fdb5e1fb697d8710b5f2e6cdefb52 Mon Sep 17 00:00:00 2001
+From: lixuyuan4 <lixuyuan4@huawei.com>
+Date: Tue, 9 Jun 2026 11:18:34 +0800
+Subject: [PATCH] qemu: arm64: replace malloc with g_new0 in PPTT cache build
+
+Replace malloc/free with g_new0/g_free for struct cache_level_info
+allocation in virt-acpi-build.c. g_new0 is the preferred GLib
+allocator in QEMU, which automatically aborts on allocation failure
+and zeroes the allocated memory, eliminating the need for manual
+NULL checks.
+
+Signed-off-by: lixuyuan <lixuyuan4@huawei.com>
+---
+ hw/arm/virt-acpi-build.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/hw/arm/virt-acpi-build.c b/hw/arm/virt-acpi-build.c
+index 2f1c9ef3b8..32b6c032ae 100644
+--- a/hw/arm/virt-acpi-build.c
++++ b/hw/arm/virt-acpi-build.c
+@@ -189,7 +189,7 @@ static struct cache_level_info* make_cache_if_enable_internal(struct PpttBuildCt
+         if (ctx->ms->smp_cache.props[i].topology == bind && ctx->ms->smp_cache.props[i].size > 0) {
+             set_bit(i, bind_mask);
+ 
+-            struct cache_level_info* node = malloc(sizeof(struct cache_level_info));
++            struct cache_level_info* node = g_new0(struct cache_level_info, 1);
+             node->offset = ctx->table_data->len - ctx->pptt_start;
+             node->level_name = CacheLevelAndType_str(ctx->ms->smp_cache.props[i].cache);
+             node->level = atoi(node->level_name + 1); // level_name格式为L1D/L1I/L2/L3等，直接取数字部分
+@@ -229,7 +229,7 @@ static int make_cache_if_enable(struct PpttBuildCtx *ctx, CpuTopologyLevel bind,
+         struct cache_level_info* next = curr->next;
+         cache_buf[cache_count++] = curr->offset;
+         int level = curr->level;
+-        free(curr);
++        g_free(curr);
+         if (next != NULL && next->level != level) {
+             curr = next;
+             break;
+@@ -238,7 +238,7 @@ static int make_cache_if_enable(struct PpttBuildCtx *ctx, CpuTopologyLevel bind,
+     }
+     while (curr) {
+         struct cache_level_info* next = curr->next;
+-        free(curr);
++        g_free(curr);
+         curr = next;
+     }
+     return cache_count;
+-- 
+2.34.1
+
