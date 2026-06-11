@@ -1,0 +1,885 @@
+From 1d562c8b552d869556b668fce7728939d4d55b1c Mon Sep 17 00:00:00 2001
+From: lutong <lutong14@huawei.com>
+Date: Thu, 11 Jun 2026 22:37:53 +0800
+Subject: [PATCH 4/4] mm/hugetlb: add fault-time reclaim, inactive list and
+ NUMA policy
+
+Implement fault-time direct reclaim for HugeTLB pages when OOM,
+avoiding costly global reclaim. Add an inactive list with a
+three-state machine and proactive reclaim to speed up fault-time
+reclaim. Honour shared NUMA memory policy on hugetlbfs mappings
+and fix lock ordering.
+
+Signed-off-by: nashzhou <zhouhaipeng13@huawei.com>
+---
+ fs/hugetlbfs/inode.c    |   8 +-
+ include/linux/hugetlb.h |  36 +++
+ mm/hugetlb.c            | 549 ++++++++++++++++++++++++++++++++++++++--
+ mm/swap.c               |   7 +
+ 4 files changed, 572 insertions(+), 28 deletions(-)
+
+diff --git a/fs/hugetlbfs/inode.c b/fs/hugetlbfs/inode.c
+index e75ec6c8308b..ef1cddf83e92 100644
+--- a/fs/hugetlbfs/inode.c
++++ b/fs/hugetlbfs/inode.c
+@@ -1160,7 +1160,13 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
+ 		 * folios in these areas, we need to consume the reserves
+ 		 * to keep reservation accounting consistent.
+ 		 */
+-		hugetlb_set_vma_policy(&pseudo_vma, inode, index);
++		/*
++		 * The inode shared_policy tree is indexed in PAGE_SIZE units
++		 * (see hugetlb_vm_op_get_policy()), so convert the huge-page
++		 * index before looking the binding up.
++		 */
++		hugetlb_set_vma_policy(&pseudo_vma, inode,
++				       index << huge_page_order(h));
+ 		folio = alloc_hugetlb_folio(&pseudo_vma, addr, 0);
+ 		hugetlb_drop_vma_policy(&pseudo_vma);
+ 		if (IS_ERR(folio)) {
+diff --git a/include/linux/hugetlb.h b/include/linux/hugetlb.h
+index 05dbabf8abd5..924b886f7017 100644
+--- a/include/linux/hugetlb.h
++++ b/include/linux/hugetlb.h
+@@ -697,6 +697,23 @@ generic_hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
+  * HPG_vmemmap_optimized - Set when the vmemmap pages of the page are freed.
+  * HPG_raw_hwp_unreliable - Set when the hugetlb page has a hwpoison sub-page
+  *     that is not tracked by raw_hwp_page list.
++ * HPG_inactive - Set when the hugetlb folio is parked on the per-hstate
++ *	hugepage_inactivelist instead of hugepage_activelist. Admission is gated
++ *  by a single predicate in mm/hugetlb.c (hugetlb_can_park_inactive_locked).
++ *
++ *	State machine and invariants (see mm/hugetlb.c for details):
++ *
++ *	  ACTIVE   : on hugepage_activelist;   migratable=1, isolated=0,
++ *	             inactive=0.  Eligible for migration/compaction.
++ *	  ISOLATED : off both lists (caller-private list); migratable=0,
++ *	             isolated=1, inactive=0.
++ *	  INACTIVE : on hugepage_inactivelist; migratable=0, isolated=0,
++ *	             inactive=1.  Skipped by migration because migratable=0.
++ *
++ *	Synchronization: HPG_inactive is examined and modified under
++ *	hugetlb_lock together with the list pointer and nr_inactive_huge_pages.
++ *	Authoritative cache-pin state is rechecked under folio_lock by the
++ *	inactive reclaim path before the cache pin is released.
+  */
+ enum hugetlb_page_flags {
+ 	HPG_restore_reserve = 0,
+@@ -706,6 +723,7 @@ enum hugetlb_page_flags {
+ 	HPG_vmemmap_optimized,
+ 	HPG_raw_hwp_unreliable,
+ 	HPG_isolated,
++	HPG_inactive,
+ 	__NR_HPAGEFLAGS,
+ };
+ 
+@@ -801,6 +819,7 @@ HPAGEFLAG(Freed, freed)
+ HPAGEFLAG(VmemmapOptimized, vmemmap_optimized)
+ HPAGEFLAG(RawHwpUnreliable, raw_hwp_unreliable)
+ HPAGEFLAG(Isolated, isolated)
++HPAGEFLAG(Inactive, inactive)
+ 
+ #ifdef CONFIG_HUGETLB_PAGE
+ 
+@@ -822,6 +841,9 @@ struct hstate {
+ 	unsigned long nr_overcommit_huge_pages;
+ #ifdef CONFIG_HUGETLB_SWAP
+ 	unsigned long swap_huge_pages;
++	unsigned long nr_inactive_huge_pages;
++	unsigned long nr_isolated_huge_pages;
++	struct list_head hugepage_inactivelist;
+ #endif
+ 	struct list_head hugepage_activelist;
+ 	struct list_head hugepage_freelists[MAX_NUMNODES];
+@@ -835,6 +857,9 @@ struct hstate {
+ 	struct cftype cgroup_files_legacy[10];
+ #endif
+ 	char name[HSTATE_NAME_LEN];
++#ifdef CONFIG_HUGETLB_SWAP
++	wait_queue_head_t reclaim_wait;
++#endif
+ };
+ 
+ struct huge_bootmem_page {
+@@ -1454,10 +1479,21 @@ int hugetlbfs_writepage(struct page *page, struct writeback_control *wbc);
+ void hugetlb_inc_swap_pages(struct hstate *h);
+ void hugetlb_dec_swap_pages(struct hstate *h);
+ void folio_unref_putback(struct folio *folio);
++void folio_rotate_hugetlb_to_tail(struct folio *folio);
+ void hugetlb_putback_after_reclaim(struct folio *folio);
++unsigned long hugetlb_reclaim_inactive_folios(struct hstate *h,
++					      unsigned long nr_to_reclaim,
++					      const nodemask_t *allowed);
++void hugetlb_promote_to_active(struct folio *folio);
+ bool hugetlb_swap_enabled(void);
++bool hugetlb_folio_direct_reclaim(struct vm_area_struct *vma, unsigned long addr);
+ #else
+ static inline bool hugetlb_swap_enabled(void) { return false; }
++static inline bool hugetlb_folio_direct_reclaim(struct vm_area_struct *vma,
++												unsigned long addr)
++{
++	return false;
++}
+ #endif /* CONFIG_HUGETLB_SWAP */
+ 
+ #endif /* _LINUX_HUGETLB_H */
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 8137ecc66357..540a86e61adc 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -25,6 +25,7 @@
+ #include <linux/rmap.h>
+ #include <linux/string_helpers.h>
+ #include <linux/swap.h>
++#include <linux/blkdev.h>
+ #include <linux/swapops.h>
+ #include <linux/jhash.h>
+ #include <linux/numa.h>
+@@ -1452,15 +1453,11 @@ static unsigned long available_huge_pages(struct hstate *h)
+ }
+ 
+ static struct folio *dequeue_hugetlb_folio_vma(struct hstate *h,
+-				struct vm_area_struct *vma,
+-				unsigned long address, int avoid_reserve,
+-				long chg)
++				struct vm_area_struct *vma, int avoid_reserve,
++				long chg, gfp_t gfp_mask, int nid,
++				nodemask_t *nodemask, struct mempolicy *mpol)
+ {
+ 	struct folio *folio = NULL;
+-	struct mempolicy *mpol;
+-	gfp_t gfp_mask;
+-	nodemask_t *nodemask;
+-	int nid;
+ 
+ 	/*
+ 	 * A child process with MAP_PRIVATE mappings created by their parent
+@@ -1468,14 +1465,11 @@ static struct folio *dequeue_hugetlb_folio_vma(struct hstate *h,
+ 	 * not "stolen". The child may still get SIGKILLed
+ 	 */
+ 	if (!vma_has_reserves(vma, chg) && !available_huge_pages(h))
+-		goto err;
++		goto out;
+ 
+ 	/* If reserves cannot be used, ensure enough pages are in the pool */
+ 	if (avoid_reserve && !available_huge_pages(h))
+-		goto err;
+-
+-	gfp_mask = htlb_alloc_mask(h);
+-	nid = huge_node(vma, address, gfp_mask, &mpol, &nodemask);
++		goto out;
+ 
+ 	if (mpol_is_preferred_many(mpol)) {
+ 		folio = dequeue_hugetlb_folio_nodemask(h, gfp_mask,
+@@ -1494,11 +1488,9 @@ static struct folio *dequeue_hugetlb_folio_vma(struct hstate *h,
+ 		h->resv_huge_pages--;
+ 	}
+ 
++out:
+ 	mpol_cond_put(mpol);
+ 	return folio;
+-
+-err:
+-	return NULL;
+ }
+ 
+ /*
+@@ -2022,6 +2014,13 @@ void free_huge_folio(struct folio *folio)
+ 
+ 	spin_lock_irqsave(&hugetlb_lock, flags);
+ 	folio_clear_hugetlb_migratable(folio);
++#ifdef CONFIG_HUGETLB_SWAP
++	if (folio_test_hugetlb_inactive(folio)) {
++		folio_clear_hugetlb_inactive(folio);
++		if (!WARN_ON_ONCE(h->nr_inactive_huge_pages == 0))
++			h->nr_inactive_huge_pages--;
++	}
++#endif
+ 	hugetlb_cgroup_uncharge_folio(hstate_index(h),
+ 				     pages_per_huge_page(h), folio);
+ 	hugetlb_cgroup_uncharge_folio_rsvd(hstate_index(h),
+@@ -3359,18 +3358,12 @@ static bool try_hugetlb_reclaim_notify(struct hstate *h, struct mm_struct *mm,
+ 		mpol_cond_put(mpol);
+ 
+ 		if (!mutex_trylock(&reclaim_notify_mutex_table[nid])) {
+-			/* release mm lock for VM_FAULT_RETRY */
+-			mmap_read_unlock(mm);
+-
+ 			/* wait for others reclaim notify complete */
+ 			mutex_lock(&reclaim_notify_mutex_table[nid]);
+ 			mutex_unlock(&reclaim_notify_mutex_table[nid]);
+ 			return true;
+ 		}
+ 
+-		/* release mm lock for VM_FAULT_RETRY */
+-		mmap_read_unlock(mm);
+-
+ 		do_reclaim_notify(RR_HUGEPAGE_RECLAIM, &nid);
+ 
+ 		mutex_unlock(&reclaim_notify_mutex_table[nid]);
+@@ -3379,6 +3372,18 @@ static bool try_hugetlb_reclaim_notify(struct hstate *h, struct mm_struct *mm,
+ 	return false;
+ }
+ 
++static bool try_hugetlb_fault_reclaim(struct hstate *h, struct mm_struct *mm,
++				      struct vm_area_struct *vma,
++				      unsigned long haddr)
++{
++	bool retry = try_hugetlb_reclaim_notify(h, mm, vma, haddr);
++
++	if (hugetlb_swap_enabled())
++		retry |= hugetlb_folio_direct_reclaim(vma, haddr);
++
++	return retry;
++}
++
+ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
+ 				    unsigned long addr, int avoid_reserve)
+ {
+@@ -3393,6 +3398,10 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
+ 	struct mem_cgroup *memcg;
+ 	bool deferred_reserve;
+ 	gfp_t gfp = htlb_alloc_mask(h) | __GFP_RETRY_MAYFAIL;
++	gfp_t gfp_mask;
++	struct mempolicy *mpol;
++	nodemask_t *nodemask;
++	int nid;
+ 
+ 	memcg = get_mem_cgroup_from_current();
+ 	memcg_charge_ret = mem_cgroup_hugetlb_try_charge(memcg, gfp, nr_pages);
+@@ -3466,13 +3475,17 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
+ 		goto out;
+ 	}
+ 
++	gfp_mask = htlb_alloc_mask(h);
++	nid = huge_node(vma, addr, gfp_mask, &mpol, &nodemask);
++
+ 	spin_lock_irq(&hugetlb_lock);
+ 	/*
+ 	 * glb_chg is passed to indicate whether or not a page must be taken
+ 	 * from the global free pool (global change).  gbl_chg == 0 indicates
+ 	 * a reservation exists for the allocation.
+ 	 */
+-	folio = dequeue_hugetlb_folio_vma(h, vma, addr, avoid_reserve, gbl_chg);
++	folio = dequeue_hugetlb_folio_vma(h, vma, avoid_reserve, gbl_chg,
++					  gfp_mask, nid, nodemask, mpol);
+ 	if (!folio) {
+ 		spin_unlock_irq(&hugetlb_lock);
+ 		folio = alloc_buddy_hugetlb_folio_with_mpol(h, vma, addr);
+@@ -4836,6 +4849,12 @@ void __init hugetlb_add_hstate(unsigned int order)
+ 	INIT_LIST_HEAD(&h->hugepage_activelist);
+ 	h->next_nid_to_alloc = first_memory_node;
+ 	h->next_nid_to_free = first_memory_node;
++#ifdef CONFIG_HUGETLB_SWAP
++	h->nr_inactive_huge_pages = 0;
++	h->nr_isolated_huge_pages = 0;
++	init_waitqueue_head(&h->reclaim_wait);
++	INIT_LIST_HEAD(&h->hugepage_inactivelist);
++#endif
+ 	snprintf(h->name, HSTATE_NAME_LEN, "hugepages-%lukB",
+ 					huge_page_size(h)/SZ_1K);
+ 
+@@ -5215,6 +5234,7 @@ void hugetlb_report_meminfo(struct seq_file *m)
+ 				   "HugePages_Surp:    %5lu\n"
+ #ifdef CONFIG_HUGETLB_SWAP
+ 				   "HugePages_Swap:    %5lu\n"
++				   "HugePages_Inactive:%5lu\n"
+ #endif
+ 				   "Hugepagesize:   %8lu kB\n",
+ 				   count,
+@@ -5223,6 +5243,7 @@ void hugetlb_report_meminfo(struct seq_file *m)
+ 				   h->surplus_huge_pages,
+ #ifdef CONFIG_HUGETLB_SWAP
+ 				   h->swap_huge_pages,
++				   h->nr_inactive_huge_pages,
+ #endif
+ 				   huge_page_size(h) / SZ_1K);
+ 	}
+@@ -5468,12 +5489,51 @@ static vm_fault_t hugetlb_vm_op_fault(struct vm_fault *vmf)
+  * shmget/shmat with "huge page" specified are backed by hugetlbfs files,
+  * their original vm_ops are overwritten with shm_vm_ops.
+  */
++#ifdef CONFIG_NUMA
++static int hugetlb_vm_op_set_policy(struct vm_area_struct *vma,
++				    struct mempolicy *mpol)
++{
++	struct inode *inode = file_inode(vma->vm_file);
++
++	if (!(vma->vm_flags & VM_MAYSHARE))
++		return 0;
++
++	return mpol_set_shared_policy(&HUGETLBFS_I(inode)->policy, vma, mpol);
++}
++
++static struct mempolicy *hugetlb_vm_op_get_policy(struct vm_area_struct *vma,
++						  unsigned long addr,
++						  pgoff_t *ilx)
++{
++	struct inode *inode = file_inode(vma->vm_file);
++	pgoff_t index;
++
++	if (!(vma->vm_flags & VM_MAYSHARE)) {
++		*ilx = 0;
++		return vma->vm_policy;
++	}
++
++	/*
++	 * The shared_policy tree is indexed in PAGE_SIZE units to match
++	 * mpol_set_shared_policy() (which uses vma->vm_pgoff); a lookup at any
++	 * sub-page index within a huge page hits the range stored for it.
++	 */
++	*ilx = inode->i_ino;
++	index = ((addr - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
++	return mpol_shared_policy_lookup(&HUGETLBFS_I(inode)->policy, index);
++}
++#endif
++
+ const struct vm_operations_struct hugetlb_vm_ops = {
+ 	.fault = hugetlb_vm_op_fault,
+ 	.open = hugetlb_vm_op_open,
+ 	.close = hugetlb_vm_op_close,
+ 	.may_split = hugetlb_vm_op_split,
+ 	.pagesize = hugetlb_vm_op_pagesize,
++#ifdef CONFIG_NUMA
++	.set_policy = hugetlb_vm_op_set_policy,
++	.get_policy = hugetlb_vm_op_get_policy,
++#endif
+ };
+ 
+ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
+@@ -6481,7 +6541,8 @@ static struct folio *hugetlbfs_do_swapin(struct address_space *mapping,
+ 		 */
+ 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO))
+ 			skip_swapcache = true;
+-	}
++	} else
++		hugetlb_promote_to_active(folio);
+ 
+ 	folio_lock(folio);
+ 
+@@ -6645,6 +6706,19 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 				PTR_ERR(folio) == -ENOSPC) {
+ 				ret = hugetlb_pte_stable(h, mm, ptep, old_pte) ?
+ 				      vmf_error(PTR_ERR(folio)) : 0;
++
++				if (ret && (flags & FAULT_FLAG_ALLOW_RETRY) &&
++				    !(flags & FAULT_FLAG_RETRY_NOWAIT)) {
++					hugetlb_vma_unlock_read(vma);
++					mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++
++					if (try_hugetlb_fault_reclaim(h, mm, vma, haddr)) {
++						mmap_read_unlock(mm);
++						return VM_FAULT_RETRY;
++					}
++
++					return ret;
++				}
+ 				goto out;
+ 			}
+ 
+@@ -6703,13 +6777,15 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 
+ 			if (ret && PTR_ERR(folio) == -ENOSPC &&
+ 				(flags & FAULT_FLAG_ALLOW_RETRY) &&
+-				!(flags & FAULT_FLAG_TRIED) &&
+ 				!(flags & FAULT_FLAG_RETRY_NOWAIT)) {
+ 				hugetlb_vma_unlock_read(vma);
+ 				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+ 
+-				if (try_hugetlb_reclaim_notify(h, mm, vma, address))
++				if (try_hugetlb_fault_reclaim(h, mm, vma, haddr)) {
++					mmap_read_unlock(mm);
+ 					return VM_FAULT_RETRY;
++				}
++
+ 				return ret;
+ 			}
+ 
+@@ -6917,8 +6993,11 @@ static vm_fault_t hugetlb_anon_swapin(struct mm_struct *mm,
+ 				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+ 				put_swap_device(si);
+ 
+-				if (try_hugetlb_reclaim_notify(h, mm, vma, haddr))
++				if (try_hugetlb_fault_reclaim(h, mm, vma, haddr)) {
++					mmap_read_unlock(mm);
+ 					return VM_FAULT_RETRY;
++				}
++
+ 				return ret;
+ 			}
+ 
+@@ -6968,6 +7047,7 @@ static vm_fault_t hugetlb_anon_swapin(struct mm_struct *mm,
+ 					page_swap_entry(&folio->page).val != entry.val)) {
+ 			goto out_page;
+ 		}
++		hugetlb_promote_to_active(folio);
+ 	}
+ 
+ 	/*
+@@ -8233,6 +8313,13 @@ static bool __isolate_hugetlb_locked(struct folio *folio, struct list_head *list
+ 	folio_set_hugetlb_isolated(folio);
+ 	folio_clear_hugetlb_migratable(folio);
+ 	list_move_tail(&folio->lru, list);
++#ifdef CONFIG_HUGETLB_SWAP
++	folio_hstate(folio)->nr_isolated_huge_pages++;
++	if (folio_test_hugetlb_inactive(folio)) {
++		folio_clear_hugetlb_inactive(folio);
++		folio_hstate(folio)->nr_inactive_huge_pages--;
++	}
++#endif
+ 	return true;
+ }
+ 
+@@ -8284,6 +8371,10 @@ void folio_putback_active_hugetlb(struct folio *folio)
+ 	folio_clear_hugetlb_isolated(folio);
+ 	folio_set_hugetlb_migratable(folio);
+ 	list_move_tail(&folio->lru, &h->hugepage_activelist);
++#ifdef CONFIG_HUGETLB_SWAP
++	if (!WARN_ON_ONCE(h->nr_isolated_huge_pages == 0))
++		h->nr_isolated_huge_pages--;
++#endif
+ 	spin_unlock_irq(&hugetlb_lock);
+ 	folio_put(folio);
+ }
+@@ -8297,6 +8388,8 @@ void folio_unref_putback(struct folio *folio)
+ 	folio_clear_hugetlb_isolated(folio);
+ 	folio_set_hugetlb_migratable(folio);
+ 	list_add_tail(&folio->lru, &h->hugepage_activelist);
++	if (!WARN_ON_ONCE(h->nr_isolated_huge_pages == 0))
++		h->nr_isolated_huge_pages--;
+ 	spin_unlock_irq(&hugetlb_lock);
+ 	free_huge_folio(folio);
+ }
+@@ -8947,8 +9040,410 @@ int hugetlb_unuse_vma(struct vm_area_struct *vma, unsigned int type)
+ 	return ret;
+ }
+ 
++#define HUGETLB_RECLAIM_BATCH 2
++#define MAX_HUGETLB_RECLAIM_RETRIES 16
++#define HUGETLB_INACTIVE_SCAN_RATIO	3
++
++static inline bool too_many_isolated(struct hstate *h)
++{
++	return READ_ONCE(h->nr_isolated_huge_pages) > (h->nr_huge_pages / 4);	/* 25% */
++}
++
++/*
++ * Hugetlb folio state machine
++ * ---------------------------
++ *
++ * Every hugetlb folio tracked by an hstate is in exactly one of three
++ * states.  The state is encoded in the {HPG_migratable, HPG_isolated,
++ * HPG_inactive} flag bits and the list it lives on:
++ *
++ *   ACTIVE   : on h->hugepage_activelist;
++ *              migratable=1, isolated=0, inactive=0.
++ *              Eligible for migration / compaction.
++ *
++ *   ISOLATED : on a caller-private list (off both hstate lists);
++ *              migratable=0, isolated=1, inactive=0.
++ *              Reached via isolate_hugetlb() or
++ *              __isolate_hugetlb_inactive_locked().
++ *
++ *   INACTIVE : on h->hugepage_inactivelist;
++ *              migratable=0, isolated=0, inactive=1.
++ *              Reached via hugetlb_putback_after_reclaim() when the
++ *              inactive admission policy admits the folio.  Migration
++ *              and compaction skip these because migratable=0.
++ *
++ * Allowed transitions:
++ *
++ *               isolate
++ *      ACTIVE  ───────►  ISOLATED ◄──────┐
++ *         ▲                 │  │         │
++ *         │  putback        │  │ park    │ isolate-from-inactive
++ *         │  (admission     │  │ (policy │
++ *         │   denies)       │  │  admits)│
++ *         └─────────────────┘  ▼         │
++ *                            INACTIVE ───┘
++ *                              │  ▲
++ *                              │  │
++ *                          promote (swap-in)
++ *
++ * State mutation is performed exclusively by the __locked helpers
++ * below; each one lockdep_assert_held(&hugetlb_lock).  Public APIs are
++ * thin wrappers that take the lock and dispatch.  Counters
++ * (nr_inactive_huge_pages) are maintained inside the same critical
++ * section as the list moves, so they cannot drift from the list length.
++ *
++ * The inactive list is FIFO: insertion uses list_add_tail(), drain
++ * scans from the head.  Head = oldest = next victim.
++ */
++
++static void __hugetlb_putback_active_locked(struct folio *folio,
++					    struct hstate *h)
++{
++	lockdep_assert_held(&hugetlb_lock);
++	folio_clear_hugetlb_isolated(folio);
++	folio_set_hugetlb_migratable(folio);
++	list_move(&folio->lru, &h->hugepage_activelist);
++	if (!WARN_ON_ONCE(h->nr_isolated_huge_pages == 0))
++		h->nr_isolated_huge_pages--;
++}
++
++static void __hugetlb_park_inactive_locked(struct folio *folio,
++					   struct hstate *h)
++{
++	lockdep_assert_held(&hugetlb_lock);
++	WARN_ON_ONCE(folio_test_hugetlb_inactive(folio));
++	folio_clear_hugetlb_isolated(folio);
++	folio_clear_hugetlb_migratable(folio);
++	folio_set_hugetlb_inactive(folio);
++	h->nr_inactive_huge_pages++;
++	list_move(&folio->lru, &h->hugepage_inactivelist);
++	if (!WARN_ON_ONCE(h->nr_isolated_huge_pages == 0))
++		h->nr_isolated_huge_pages--;
++}
++
++static void __hugetlb_promote_active_locked(struct folio *folio,
++					    struct hstate *h)
++{
++	lockdep_assert_held(&hugetlb_lock);
++	WARN_ON_ONCE(!folio_test_hugetlb_inactive(folio));
++	folio_clear_hugetlb_inactive(folio);
++	folio_set_hugetlb_migratable(folio);
++	list_move(&folio->lru, &h->hugepage_activelist);
++	if (WARN_ON_ONCE(h->nr_inactive_huge_pages == 0))
++		return;
++	h->nr_inactive_huge_pages--;
++}
++
++/*
++ * Inactive admission rule.
++ */
++static bool hugetlb_inactive_admits_locked(struct folio *folio)
++{
++	lockdep_assert_held(&hugetlb_lock);
++	return folio_test_swapcache(folio) && !folio_mapped(folio);
++}
++
++/*
++ * hugetlb_putback_after_reclaim - the single putback called by the page
++ * reclaim shrinker after shrink_folio_list() returns a hugetlb folio.
++ *
++ * The folio is in the ISOLATED state (HPG_isolated set, on the caller's
++ * private list which has already been unlinked).  Under one hugetlb_lock
++ * critical section we consult the inactive admission policy and route to
++ * either INACTIVE (policy admits) or ACTIVE (policy denies).  This is the
++ * only path that consumes the inactive admission policy, so all callers
++ * see consistent routing.
++ *
++ * Drops the caller's reference.
++ */
+ void hugetlb_putback_after_reclaim(struct folio *folio)
+ {
+-	folio_putback_active_hugetlb(folio);
++	struct hstate *h;
++
++	if (WARN_ON_ONCE(!folio_test_hugetlb(folio))) {
++		folio_put(folio);
++		return;
++	}
++
++	h = folio_hstate(folio);
++
++	spin_lock_irq(&hugetlb_lock);
++	if (hugetlb_inactive_admits_locked(folio))
++		__hugetlb_park_inactive_locked(folio, h);
++	else
++		__hugetlb_putback_active_locked(folio, h);
++	spin_unlock_irq(&hugetlb_lock);
++
++	folio_put(folio);
++}
++
++/*
++ * hugetlb_promote_to_active - move a folio off the inactive list back
++ * onto the active list.
++ *
++ * Called from the swap-in / fault-in paths after a folio has been pulled
++ * out of the swap cache and is about to be remapped or re-attached to a
++ * page cache.  Idempotent: if the folio is not currently HPG_inactive,
++ * this is a no-op so call sites can invoke it unconditionally.
++ */
++void hugetlb_promote_to_active(struct folio *folio)
++{
++	struct hstate *h;
++
++	spin_lock_irq(&hugetlb_lock);
++	if (folio_test_hugetlb_isolated(folio) || !folio_test_hugetlb_inactive(folio)) {
++		spin_unlock_irq(&hugetlb_lock);
++		return;
++	}
++
++	h = folio_hstate(folio);
++	__hugetlb_promote_active_locked(folio, h);
++	spin_unlock_irq(&hugetlb_lock);
++}
++
++/*
++ * Isolate a folio from the inactive list (INACTIVE -> ISOLATED).  Both
++ * the list move and the per-hstate counter decrement happen inside the
++ * caller's hugetlb_lock critical section, keeping the counter and list
++ * length in lockstep.
++ */
++static bool __isolate_hugetlb_inactive_locked(struct folio *folio,
++					      struct hstate *h,
++					      struct list_head *list)
++{
++	lockdep_assert_held(&hugetlb_lock);
++
++	WARN_ON_ONCE(!folio_test_hugetlb_inactive(folio));
++	if (!folio_test_hugetlb(folio) ||
++	    !folio_test_hugetlb_inactive(folio) ||
++	    folio_test_hugetlb_isolated(folio) ||
++	    !folio_try_get(folio))
++		return false;
++
++	folio_set_hugetlb_isolated(folio);
++	list_move_tail(&folio->lru, list);
++	h->nr_isolated_huge_pages++;
++	folio_clear_hugetlb_inactive(folio);
++	if (WARN_ON_ONCE(h->nr_inactive_huge_pages == 0))
++		return true;
++	h->nr_inactive_huge_pages--;
++	return true;
++}
++
++unsigned long hugetlb_reclaim_inactive_folios(struct hstate *h,
++					      unsigned long nr_to_reclaim,
++					      const nodemask_t *allowed)
++{
++	LIST_HEAD(pagelist);
++	struct folio *folio, *next;
++	unsigned long isolated = 0;
++	unsigned long nr_reclaimed = 0;
++	unsigned long nr_to_scan = nr_to_reclaim * HUGETLB_INACTIVE_SCAN_RATIO;
++
++	if (!h)
++		return 0;
++
++	cond_resched();
++
++	spin_lock_irq(&hugetlb_lock);
++	list_for_each_entry_safe_reverse(folio, next,
++				 &h->hugepage_inactivelist, lru) {
++		/*
++		 * Only reclaim folios on nodes the faulting allocation can
++		 * actually consume on retry (e.g. an MPOL_BIND nodemask):
++		 * freeing a folio on any other node does not relieve the
++		 * pressure that triggered direct reclaim.  A NULL mask means
++		 * no node restriction (default policy / proactive trigger).
++		 */
++		if (allowed && !node_isset(folio_nid(folio), *allowed))
++			continue;
++		if (__isolate_hugetlb_inactive_locked(folio, h, &pagelist))
++			isolated++;
++		if (isolated >= nr_to_scan)
++			break;
++	}
++	spin_unlock_irq(&hugetlb_lock);
++
++	if (!isolated)
++		return 0;
++
++	nr_reclaimed = reclaim_pages(&pagelist, true) >> huge_page_order(h);
++	return nr_reclaimed;
++}
++
++void folio_rotate_hugetlb_to_tail(struct folio *folio)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&hugetlb_lock, flags);
++	if (folio_test_hugetlb_isolated(folio)) {
++		spin_unlock_irqrestore(&hugetlb_lock, flags);
++		return;
++	}
++
++	if (folio_test_hugetlb_inactive(folio))
++		list_move_tail(&folio->lru, &(folio_hstate(folio))->hugepage_inactivelist);
++	else
++		list_move_tail(&folio->lru, &(folio_hstate(folio))->hugepage_activelist);
++	spin_unlock_irqrestore(&hugetlb_lock, flags);
++}
++
++/*
++ * Wait while too many hugetlb folios are isolated pool-wide.  Shared by
++ * the fault-path direct reclaimer (interruptible=false) and the proactive
++ * reclaim_inactive sysfs trigger (interruptible=true, so a userspace
++ * writer blocked on the gate can be cancelled with SIGINT).
++ *
++ * Returns 0 to proceed, -EINTR if a signal cancelled the wait.
++ */
++static int hugetlb_reclaim_throttle(struct hstate *h, bool interruptible)
++{
++	long state = interruptible ? TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE;
++
++	while (too_many_isolated(h)) {
++		DEFINE_WAIT(wait);
++		wait_queue_head_t *wqh = &h->reclaim_wait;
++
++		/*
++		 * Re-test the gate after joining the wait queue so a wake-up
++		 * from hugetlb_dec_nr_isolated() racing the check above is not
++		 * lost.  The timeout is a safety net, not the wake-up source.
++		 */
++		prepare_to_wait(wqh, &wait, state);
++		if (too_many_isolated(h))
++			schedule_timeout(HZ / 50);	/* 20ms cap */
++		finish_wait(wqh, &wait);
++
++		if (interruptible && signal_pending(current))
++			return -EINTR;
++		if (fatal_signal_pending(current))
++			return -EINTR;
++	}
++	return 0;
++}
++
++static unsigned long reclaim_hugetlb_folios(struct hstate *h,
++					    unsigned long nr_to_scan,
++					    const nodemask_t *allowed)
++{
++	unsigned long isolated = 0;
++	struct folio *folio, *next;
++	unsigned long nr_reclaimed = 0;
++	LIST_HEAD(pagelist);
++
++	cond_resched();
++
++	if (hugetlb_reclaim_throttle(h, false))
++		return 0;
++
++	/*
++	 * Drain the inactive list first: these folios have already been
++	 * add_to_swap + try_to_unmap + pageout'd, so all we need is to
++	 * drop the swap cache reference and free the page.  This is much
++	 * cheaper than scanning the active list.
++	 */
++	nr_reclaimed = hugetlb_reclaim_inactive_folios(h, nr_to_scan, allowed);
++	if (nr_reclaimed >= nr_to_scan)
++		return nr_reclaimed;
++	nr_to_scan -= nr_reclaimed;
++
++	/*
++	 * Fall back to the active list for the remaining pages.
++	 * This is the expensive path: add_to_swap, try_to_unmap, pageout.
++	 */
++	spin_lock_irq(&hugetlb_lock);
++	list_for_each_entry_safe_reverse(folio, next, &h->hugepage_activelist, lru) {
++		/* See the node filter in hugetlb_reclaim_inactive_folios(). */
++		if (allowed && !node_isset(folio_nid(folio), *allowed))
++			continue;
++		if (folio_ref_count(folio) && __isolate_hugetlb_locked(folio, &pagelist))
++			isolated++;
++
++		if (isolated >= nr_to_scan)
++			break;
++	}
++	spin_unlock_irq(&hugetlb_lock);
++
++	if (!isolated)
++		return nr_reclaimed;
++
++	nr_reclaimed += reclaim_pages(&pagelist, true) >> huge_page_order(h);
++	return nr_reclaimed;
++}
++
++static unsigned long perform_hugetlb_folio_reclaim(struct hstate *h,
++						   unsigned long nr_to_reclaim,
++						   const nodemask_t *allowed)
++{
++	unsigned long total_pages = h->nr_huge_pages - h->free_huge_pages -
++				    READ_ONCE(h->nr_isolated_huge_pages);
++	unsigned long nr_reclaimed = 0;
++	struct blk_plug plug;
++
++	blk_start_plug(&plug);
++	while (total_pages && nr_reclaimed < nr_to_reclaim) {
++		unsigned long nr_to_scan = min_t(unsigned long, total_pages,
++						 HUGETLB_RECLAIM_BATCH);
++
++		total_pages -= nr_to_scan;
++		nr_reclaimed += reclaim_hugetlb_folios(h, nr_to_scan, allowed);
++		cond_resched();
++	}
++	blk_finish_plug(&plug);
++	return nr_reclaimed;
++}
++
++bool hugetlb_folio_direct_reclaim(struct vm_area_struct *vma, unsigned long addr)
++{
++	int loops = 0;
++	unsigned long nr_reclaimed;
++	struct hstate *h = hstate_vma(vma);
++	const nodemask_t *allowed = NULL;
++	struct mempolicy *mpol;
++	nodemask_t *nodemask;
++	bool node_restricted;
++	gfp_t gfp_mask;
++
++	if (!h || hstate_is_gigantic(h))
++		return false;
++
++	/*
++	 * Mirror dequeue_hugetlb_folio_vma()'s node selection so we only
++	 * reclaim folios the retried allocation can actually consume:
++	 * freeing a hugepage on a node outside the fault's mempolicy does
++	 * not relieve the pressure that triggered direct reclaim.  Only a
++	 * strict MPOL_BIND nodemask restricts placement; default, preferred
++	 * and preferred-many policies fall back to the full zonelist on
++	 * retry and therefore impose no restriction (allowed stays NULL,
++	 * preserving the original cross-node behaviour).  vma and the
++	 * mempolicy are stable here: callers still hold mmap_read_lock.
++	 */
++	gfp_mask = htlb_alloc_mask(h);
++	huge_node(vma, addr, gfp_mask, &mpol, &nodemask);
++	if (nodemask && !mpol_is_preferred_many(mpol))
++		allowed = nodemask;
++	node_restricted = allowed != NULL;
++
++retry:
++	nr_reclaimed = perform_hugetlb_folio_reclaim(h, HUGETLB_RECLAIM_BATCH,
++						     allowed);
++	if (nr_reclaimed) {
++		mpol_cond_put(mpol);
++		return true;
++	}
++
++	/*
++	 * With a binding nodemask, a zero-progress pass means the target
++	 * nodes have nothing reclaimable -- the entire node-filtered list
++	 * was already scanned, so retrying just repeats identical work.
++	 * Fail fast to OOM/SIGBUS instead of spinning
++	 * MAX_HUGETLB_RECLAIM_RETRIES times.  Unrestricted callers keep
++	 * retrying to absorb transient races with concurrent isolators.
++	 */
++	if (!node_restricted && loops++ < MAX_HUGETLB_RECLAIM_RETRIES)
++		goto retry;
++
++	mpol_cond_put(mpol);
++	return false;
+ }
+ #endif /* CONFIG_HUGETLB_SWAP */
+diff --git a/mm/swap.c b/mm/swap.c
+index c8c98622311e..93410ccc5842 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -241,6 +241,13 @@ void folio_rotate_reclaimable(struct folio *folio)
+ 		struct folio_batch *fbatch;
+ 		unsigned long flags;
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++		if (folio_test_hugetlb(folio)) {
++			folio_rotate_hugetlb_to_tail(folio);
++			return;
++		}
++#endif
++
+ 		folio_get(folio);
+ 		if (!folio_test_clear_lru(folio)) {
+ 			folio_put(folio);
+-- 
+2.43.0
+

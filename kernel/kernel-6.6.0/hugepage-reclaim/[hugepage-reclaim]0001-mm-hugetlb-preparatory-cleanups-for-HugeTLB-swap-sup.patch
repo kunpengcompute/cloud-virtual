@@ -1,0 +1,385 @@
+From 1db23fb2801bcb81dd0b83924c7a7818c1a97c2e Mon Sep 17 00:00:00 2001
+From: lutong <lutong14@huawei.com>
+Date: Thu, 11 Jun 2026 22:36:52 +0800
+Subject: [PATCH 1/4] mm/hugetlb: preparatory cleanups for HugeTLB swap support
+
+Store HPAGEFLAGS in a dedicated tail-page slot to avoid aliasing
+with folio->swap. Gate huge_pmd_unshare on the config symbol.
+Convert etmem add_page_for_swap to folio API and flush remote TLBs
+on non-x86. Split hugetlb_add_to_page_cache for already-locked
+callers. Add HPG_isolated flag and serialise isolation under
+hugetlb_lock.
+
+Signed-off-by: nashzhou <zhouhaipeng13@huawei.com>
+---
+ fs/proc/etmem_scan.c    |  2 -
+ fs/proc/etmem_swap.c    |  1 +
+ include/linux/hugetlb.h | 85 +++++++++++++++++++++++++++--------------
+ mm/etmem.c              | 20 ++++------
+ mm/hugetlb.c            | 58 ++++++++++++++++++++--------
+ mm/rmap.c               | 10 +++--
+ 6 files changed, 113 insertions(+), 63 deletions(-)
+
+diff --git a/fs/proc/etmem_scan.c b/fs/proc/etmem_scan.c
+index 1b5436d50e47..0d0de03ae7b7 100644
+--- a/fs/proc/etmem_scan.c
++++ b/fs/proc/etmem_scan.c
+@@ -1054,11 +1054,9 @@ static int page_scan_release(struct inode *inode, struct file *file)
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+-#ifdef CONFIG_X86_64
+ 	write_lock(&kvm->mmu_lock);
+ 	kvm_flush_remote_tlbs(kvm);
+ 	write_unlock(&kvm->mmu_lock);
+-#endif
+ 
+ out:
+ 	module_put(THIS_MODULE);
+diff --git a/fs/proc/etmem_swap.c b/fs/proc/etmem_swap.c
+index 20ac09d67d33..f145b40817c9 100644
+--- a/fs/proc/etmem_swap.c
++++ b/fs/proc/etmem_swap.c
+@@ -69,6 +69,7 @@ static ssize_t swap_pages_write(struct file *file, const char __user *buf,
+ 			continue;
+ 
+ 		add_page_for_swap(page, &pagelist);
++		put_page(page);
+ 	}
+ 
+ 	if (!list_empty(&pagelist))
+diff --git a/include/linux/hugetlb.h b/include/linux/hugetlb.h
+index e4e243bad311..bfbf06907e5d 100644
+--- a/include/linux/hugetlb.h
++++ b/include/linux/hugetlb.h
+@@ -657,9 +657,11 @@ generic_hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
+ 				  unsigned long flags);
+ 
+ /*
+- * huegtlb page specific state flags.  These flags are located in page.private
+- * of the hugetlb head page.  Functions created via the below macros should be
+- * used to manipulate these flags.
++ * hugetlb page specific state flags.  These flags are stored in the 8-byte
++ * slot at tail page 2 that overlays struct page._mapcount / _refcount,
++ * reached via folio_hugetlb_pflags() (no dedicated struct folio member, so
++ * the folio/page layout and kABI are unchanged).
++ * Functions created via the below macros should be used to manipulate these flags.
+  *
+  * HPG_restore_reserve - Set when a hugetlb page consumes a reservation at
+  *	allocation time.  Cleared when page is fully instantiated.  Free
+@@ -693,40 +695,64 @@ enum hugetlb_page_flags {
+ 	HPG_freed,
+ 	HPG_vmemmap_optimized,
+ 	HPG_raw_hwp_unreliable,
++	HPG_isolated,
+ 	__NR_HPAGEFLAGS,
+ };
+ 
++/*
++ * Only the low 32 bits are safe to use: they alias tail page [2]->_mapcount.
++ * The high 32 bits alias the adjacent _refcount; HPG_* must stay < 32 so
++ * set_bit()/clear_bit() never touch the refcount half of the word.
++ */
++#define folio_hugetlb_pflags(folio) \
++	(*(unsigned long *)&folio_page(folio, 2)->_mapcount)
++
++static_assert(__NR_HPAGEFLAGS <= 32,
++	      "HPAGEFLAGS must fit in low 32 bits of folio_hugetlb_pflags()");
++
+ /*
+  * Macros to create test, set and clear function definitions for
+  * hugetlb specific page flags.
+  */
+ #ifdef CONFIG_HUGETLB_PAGE
+-#define TESTHPAGEFLAG(uname, flname)				\
+-static __always_inline						\
+-bool folio_test_hugetlb_##flname(struct folio *folio)		\
+-	{	void *private = &folio->private;		\
+-		return test_bit(HPG_##flname, private);		\
+-	}							\
+-static inline int HPage##uname(struct page *page)		\
+-	{ return test_bit(HPG_##flname, &(page->private)); }
+-
+-#define SETHPAGEFLAG(uname, flname)				\
+-static __always_inline						\
+-void folio_set_hugetlb_##flname(struct folio *folio)		\
+-	{	void *private = &folio->private;		\
+-		set_bit(HPG_##flname, private);			\
+-	}							\
+-static inline void SetHPage##uname(struct page *page)		\
+-	{ set_bit(HPG_##flname, &(page->private)); }
+-
+-#define CLEARHPAGEFLAG(uname, flname)				\
+-static __always_inline						\
+-void folio_clear_hugetlb_##flname(struct folio *folio)		\
+-	{	void *private = &folio->private;		\
+-		clear_bit(HPG_##flname, private);		\
+-	}							\
+-static inline void ClearHPage##uname(struct page *page)		\
+-	{ clear_bit(HPG_##flname, &(page->private)); }
++#define TESTHPAGEFLAG(uname, flname)					\
++static __always_inline							\
++bool folio_test_hugetlb_##flname(struct folio *folio)			\
++{									\
++	return test_bit(HPG_##flname, &folio_hugetlb_pflags(folio));	\
++}									\
++static inline int HPage##uname(struct page *page)			\
++{									\
++	VM_BUG_ON_PAGE(!PageHead(page), page);				\
++	return test_bit(HPG_##flname,					\
++			&folio_hugetlb_pflags(page_folio(page)));	\
++}
++
++#define SETHPAGEFLAG(uname, flname)					\
++static __always_inline							\
++void folio_set_hugetlb_##flname(struct folio *folio)			\
++{									\
++	set_bit(HPG_##flname, &folio_hugetlb_pflags(folio));		\
++}									\
++static inline void SetHPage##uname(struct page *page)			\
++{									\
++	VM_BUG_ON_PAGE(!PageHead(page), page);				\
++	set_bit(HPG_##flname,						\
++		&folio_hugetlb_pflags(page_folio(page)));		\
++}
++
++#define CLEARHPAGEFLAG(uname, flname)					\
++static __always_inline							\
++void folio_clear_hugetlb_##flname(struct folio *folio)			\
++{									\
++	clear_bit(HPG_##flname, &folio_hugetlb_pflags(folio));		\
++}									\
++static inline void ClearHPage##uname(struct page *page)			\
++{									\
++	VM_BUG_ON_PAGE(!PageHead(page), page);				\
++	clear_bit(HPG_##flname,						\
++		  &folio_hugetlb_pflags(page_folio(page)));		\
++}
+ #else
+ #define TESTHPAGEFLAG(uname, flname)				\
+ static inline bool						\
+@@ -764,6 +790,7 @@ HPAGEFLAG(Temporary, temporary)
+ HPAGEFLAG(Freed, freed)
+ HPAGEFLAG(VmemmapOptimized, vmemmap_optimized)
+ HPAGEFLAG(RawHwpUnreliable, raw_hwp_unreliable)
++HPAGEFLAG(Isolated, isolated)
+ 
+ #ifdef CONFIG_HUGETLB_PAGE
+ 
+diff --git a/mm/etmem.c b/mm/etmem.c
+index a1b2db374fdb..3637ef1b7910 100644
+--- a/mm/etmem.c
++++ b/mm/etmem.c
+@@ -43,25 +43,21 @@ struct kobj_attribute kernel_swap_enable_attr =
+ int add_page_for_swap(struct page *page, struct list_head *pagelist)
+ {
+ 	int err = -EBUSY;
+-	struct page *head;
++	struct folio *folio = page_folio(page);
+ 
+-	/* If the page is mapped by more than one process, do not swap it */
+-	if (page_mapcount(page) > 1)
++	if (folio_test_hugetlb(folio))
+ 		return -EACCES;
+ 
+-	if (PageHuge(page))
++	/* If the page is mapped by more than one process, do not swap it */
++	if (folio_mapcount(folio) > 1)
+ 		return -EACCES;
+ 
+-	head = compound_head(page);
+-	if (!folio_isolate_lru(page_folio(head))) {
+-		put_page(page);
++	if (!folio_isolate_lru(folio))
+ 		return err;
+-	}
+-	put_page(page);
+-	if (PageUnevictable(page))
+-		putback_lru_page(page);
++	if (folio_test_unevictable(folio))
++		folio_putback_lru(folio);
+ 	else
+-		list_add_tail(&head->lru, pagelist);
++		list_add_tail(&folio->lru, pagelist);
+ 
+ 	err = 0;
+ 	return err;
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index a0fcbf8db9c0..0aa5b6055ee2 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -1818,6 +1818,9 @@ static void __update_and_free_hugetlb_folio(struct hstate *h,
+ 	if (unlikely(folio_test_hwpoison(folio)))
+ 		folio_clear_hugetlb_hwpoison(folio);
+ 
++	folio_hugetlb_pflags(folio) = 0UL;
++	page_mapcount_reset(folio_page(folio, 2));
++
+ 	/*
+ 	 * Non-gigantic pages demoted from CMA allocated gigantic pages
+ 	 * need to be given back to CMA in free_gigantic_folio.
+@@ -2015,6 +2018,7 @@ void __prep_new_hugetlb_folio(struct hstate *h, struct folio *folio)
+ 	hugetlb_set_folio_subpool(folio, NULL);
+ 	set_hugetlb_cgroup(folio, NULL);
+ 	set_hugetlb_cgroup_rsvd(folio, NULL);
++	folio_hugetlb_pflags(folio) = 0UL;
+ }
+ 
+ static void prep_new_hugetlb_folio(struct hstate *h, struct folio *folio, int nid)
+@@ -6215,21 +6219,20 @@ bool hugetlbfs_pagecache_present(struct hstate *h,
+ 	return true;
+ }
+ 
+-int hugetlb_add_to_page_cache(struct folio *folio, struct address_space *mapping,
+-			   pgoff_t idx)
++static int __hugetlb_add_to_page_cache(struct folio *folio,
++				       struct address_space *mapping,
++				       pgoff_t idx)
+ {
+ 	struct inode *inode = mapping->host;
+ 	struct hstate *h = hstate_inode(inode);
+ 	int err;
+ 
++	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+ 	idx <<= huge_page_order(h);
+-	__folio_set_locked(folio);
+ 	err = __filemap_add_folio(mapping, folio, idx, GFP_KERNEL, NULL);
+-
+-	if (unlikely(err)) {
+-		__folio_clear_locked(folio);
++	if (unlikely(err))
+ 		return err;
+-	}
++
+ 	folio_clear_hugetlb_restore_reserve(folio);
+ 
+ 	/*
+@@ -6244,6 +6247,18 @@ int hugetlb_add_to_page_cache(struct folio *folio, struct address_space *mapping
+ 	return 0;
+ }
+ 
++int hugetlb_add_to_page_cache(struct folio *folio, struct address_space *mapping,
++			   pgoff_t idx)
++{
++	int err;
++
++	__folio_set_locked(folio);
++	err = __hugetlb_add_to_page_cache(folio, mapping, idx);
++	if (unlikely(err))
++		__folio_clear_locked(folio);
++	return err;
++}
++
+ static inline vm_fault_t hugetlb_handle_userfault(struct vm_area_struct *vma,
+ 						  struct address_space *mapping,
+ 						  pgoff_t idx,
+@@ -7696,20 +7711,28 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
+  * These functions are overwritable if your architecture needs its own
+  * behavior.
+  */
+-bool isolate_hugetlb(struct folio *folio, struct list_head *list)
++static bool __isolate_hugetlb_locked(struct folio *folio, struct list_head *list)
+ {
+-	bool ret = true;
++	lockdep_assert_held(&hugetlb_lock);
+ 
+-	spin_lock_irq(&hugetlb_lock);
+ 	if (!folio_test_hugetlb(folio) ||
+ 	    !folio_test_hugetlb_migratable(folio) ||
+-	    !folio_try_get(folio)) {
+-		ret = false;
+-		goto unlock;
+-	}
++	    folio_test_hugetlb_isolated(folio) ||
++	    !folio_try_get(folio))
++		return false;
++
++	folio_set_hugetlb_isolated(folio);
+ 	folio_clear_hugetlb_migratable(folio);
+ 	list_move_tail(&folio->lru, list);
+-unlock:
++	return true;
++}
++
++bool isolate_hugetlb(struct folio *folio, struct list_head *list)
++{
++	bool ret;
++
++	spin_lock_irq(&hugetlb_lock);
++	ret = __isolate_hugetlb_locked(folio, list);
+ 	spin_unlock_irq(&hugetlb_lock);
+ 	return ret;
+ }
+@@ -7746,9 +7769,12 @@ int get_huge_page_for_hwpoison(unsigned long pfn, int flags,
+ 
+ void folio_putback_active_hugetlb(struct folio *folio)
+ {
++	struct hstate *h = folio_hstate(folio);
++
+ 	spin_lock_irq(&hugetlb_lock);
++	folio_clear_hugetlb_isolated(folio);
+ 	folio_set_hugetlb_migratable(folio);
+-	list_move_tail(&folio->lru, &(folio_hstate(folio))->hugepage_activelist);
++	list_move_tail(&folio->lru, &h->hugepage_activelist);
+ 	spin_unlock_irq(&hugetlb_lock);
+ 	folio_put(folio);
+ }
+diff --git a/mm/rmap.c b/mm/rmap.c
+index 5949fe733818..66c13fafddaf 100644
+--- a/mm/rmap.c
++++ b/mm/rmap.c
+@@ -1719,8 +1719,6 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
+ 				 PageAnonExclusive(subpage);
+ 
+ 		if (folio_test_hugetlb(folio)) {
+-			bool anon = folio_test_anon(folio);
+-
+ 			/*
+ 			 * The try_to_unmap() is only passed a hugetlb page
+ 			 * in the case where the hugetlb page is poisoned.
+@@ -1745,6 +1743,8 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
+ 			 * i_mmap_rwsem.  We can only try lock here and fail
+ 			 * if unsuccessful.
+ 			 */
++#ifdef CONFIG_HUGETLB_PMD_PAGE_TABLE_SHARING
++			bool anon = folio_test_anon(folio);
+ 			if (!anon) {
+ 				VM_BUG_ON(!(flags & TTU_RMAP_LOCKED));
+ 				if (!hugetlb_vma_trylock_write(vma))
+@@ -1761,6 +1761,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
+ 				}
+ 				hugetlb_vma_unlock_write(vma);
+ 			}
++#endif
+ 			pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
+ 		} else {
+ 			nr_pages = folio_unmap_pte_batch(folio, &pvmw, flags, pteval);
+@@ -2098,8 +2099,6 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
+ 				 PageAnonExclusive(subpage);
+ 
+ 		if (folio_test_hugetlb(folio)) {
+-			bool anon = folio_test_anon(folio);
+-
+ 			/*
+ 			 * huge_pmd_unshare may unmap an entire PMD page.
+ 			 * There is no way of knowing exactly which PMDs may
+@@ -2119,6 +2118,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
+ 			 * i_mmap_rwsem.  We can only try lock here and
+ 			 * fail if unsuccessful.
+ 			 */
++#ifdef CONFIG_HUGETLB_PMD_PAGE_TABLE_SHARING
++			bool anon = folio_test_anon(folio);
+ 			if (!anon) {
+ 				VM_BUG_ON(!(flags & TTU_RMAP_LOCKED));
+ 				if (!hugetlb_vma_trylock_write(vma)) {
+@@ -2140,6 +2141,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
+ 				}
+ 				hugetlb_vma_unlock_write(vma);
+ 			}
++#endif
+ 			/* Nuke the hugetlb page table entry */
+ 			pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
+ 		} else {
+-- 
+2.43.0
+
