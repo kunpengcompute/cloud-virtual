@@ -54,18 +54,23 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
 1. 获取内核源码。
 ```bash
 cd /home/
-git clone https://gitcode.com/nashzhou/kernel.git -b feat-hugetlb-2403-v12
+git clone https://gitcode.com/openeuler/kernel.git
 cd kernel
+git checkout 43da05a574398f23d7d5d1e9126689697c022775
 ```
-2. 获取ZRAM支持KAEpatch。
+2. 获取大页内存支持reclaim功能以及ZRAM支持KAE加速功能的补丁文件。
 ```bash
 cd /home/
 git clone https://gitcode.com/boostkit/cloud-virtual.git
 ```
-3. 应用ZRAM支持KAEpatch。
+3. 应用内核补丁。
 ```bash
 cd /home/kernel
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/[zram]0001-zram-switch-to-async-acomp-and-mutex.patch
+git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[zram]0001-zram-switch-to-async-acomp-and-mutex.patch
+git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0001-mm-hugetlb-preparatory-cleanups-for-HugeTLB-swap-sup.patch
+git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0002-mm-hugetlb-add-HugeTLB-anonymous-page-swap-support.patch
+git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0003-fs-hugetlbfs-add-file-backed-HugeTLB-page-swap-and-s.patch
+git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0004-mm-hugetlb-add-fault-time-reclaim-inactive-list-and-.patch
 ```
 
 
@@ -127,12 +132,12 @@ ll /sys/class/uacce/
 1. 获取memlink源码。
 ```bash
 cd /home/
-git clone https://gitcode.com/leizongkun/memlink_6340.git -b dev
+git clone https://gitcode.com/openeuler/memlinkd.git
 ```
 2. 编译源码。
 
 ```bash
-cd memlink_6340
+cd memlinkd
 yum-builddep memlinkd.spec
 tar jcvf memlinkd.tar.bz2 --exclude=.git src
 mkdir -p /root/rpmbuild/SOURCES/
@@ -279,7 +284,7 @@ watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
 ```bash
 modprobe etmem_swap
 ```
-注意：zram快设备大小根据实际大页内存大小配置，建议配置为大页内存的50%。
+注意：ZRAM块设备大小根据实际大页内存大小配置，建议配置为整机大页内存总量的40%，ZRAM配置流程请严格遵循本文档，不支持配置writeback设备与二次压缩算法。
 ```bash
 modprobe zram
 echo deflate > /sys/block/zram0/comp_algorithm
