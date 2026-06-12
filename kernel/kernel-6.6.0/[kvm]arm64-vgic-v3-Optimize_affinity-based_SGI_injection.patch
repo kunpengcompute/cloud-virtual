@@ -146,6 +146,8 @@ index 2c982969cc30..d646afc2f0ba 100644
 +
 +		vcpu = kvm_get_vcpu(kvm,
 +				    kvm->arch.mpidr_data->cmpidr_to_idx[idx]);
++		if (vcpu == NULL)
++			return NULL;
 +		if (mpidr != kvm_vcpu_get_mpidr_aff(vcpu))
 +			vcpu = NULL;
 +
