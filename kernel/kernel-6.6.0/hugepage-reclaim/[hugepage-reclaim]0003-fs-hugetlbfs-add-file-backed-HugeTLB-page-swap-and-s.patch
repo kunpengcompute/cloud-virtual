@@ -1,0 +1,999 @@
+From 06defb47b718d1c997941f39ee9daad56665f42f Mon Sep 17 00:00:00 2001
+From: lutong <lutong14@huawei.com>
+Date: Thu, 11 Jun 2026 22:37:33 +0800
+Subject: [PATCH 3/4] fs/hugetlbfs: add file-backed HugeTLB page swap and
+ swapoff support
+
+Extend hugetlb swap to file-backed hugetlbfs mappings: pages can be
+written to swap with their slot recorded as an XArray value entry in
+the page cache, and faulted back in transparently. Implement swapoff
+support for hugetlb pages, including hugetlbfs_unuse() to read back
+swapped-out pages during swapoff.
+
+Signed-off-by: nashzhou <zhouhaipeng13@huawei.com>
+---
+ fs/hugetlbfs/inode.c    | 260 ++++++++++++++++++++++-
+ include/linux/hugetlb.h |  10 +
+ mm/filemap.c            |  47 ++++-
+ mm/hugetlb.c            | 448 +++++++++++++++++++++++++++++++++++++++-
+ mm/swapfile.c           |  12 +-
+ 5 files changed, 767 insertions(+), 10 deletions(-)
+
+diff --git a/fs/hugetlbfs/inode.c b/fs/hugetlbfs/inode.c
+index 8171f3004383..e75ec6c8308b 100644
+--- a/fs/hugetlbfs/inode.c
++++ b/fs/hugetlbfs/inode.c
+@@ -36,6 +36,8 @@
+ #include <linux/migrate.h>
+ #include <linux/uio.h>
+ #include <linux/dynamic_pool.h>
++#include <linux/swap_slots.h>
++#include <linux/swap.h>
+ 
+ #include <linux/uaccess.h>
+ #include <linux/sched/mm.h>
+@@ -63,6 +65,12 @@ struct hugetlbfs_fs_context {
+ 
+ int sysctl_hugetlb_shm_group;
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++/* Global list of hugetlbfs inodes with swapped pages */
++LIST_HEAD(hugetlbfs_swaplist);
++DEFINE_MUTEX(hugetlbfs_swaplist_mutex);
++#endif
++
+ enum hugetlb_param {
+ 	Opt_gid,
+ 	Opt_min_size,
+@@ -627,6 +635,21 @@ static bool remove_inode_single_folio(struct hstate *h, struct inode *inode,
+ 	 * lock to guarantee no concurrent migration.
+ 	 */
+ 	folio_lock(folio);
++#ifdef CONFIG_HUGETLB_SWAP
++	/*
++	 * Re-check folio_mapping under folio_lock. A concurrent
++	 * hugetlbfs_writepage() may have replaced this folio with a
++	 * swap entry in the page cache and cleared folio->mapping
++	 * before we acquired the lock. In that case the folio is no
++	 * longer ours to remove; the swap entry will be handled when
++	 * remove_inode_hugepages() iterates the page cache again.
++	 */
++	if (unlikely(folio_mapping(folio) != mapping)) {
++		folio_unlock(folio);
++		return false;
++	}
++#endif /* CONFIG_HUGETLB_SWAP */
++
+ 	if (unlikely(folio_mapped(folio)))
+ 		hugetlb_unmap_file_folio(h, mapping, folio, index);
+ 
+@@ -677,20 +700,45 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
+ 	struct address_space *mapping = &inode->i_data;
+ 	const pgoff_t end = lend >> PAGE_SHIFT;
+ 	struct folio_batch fbatch;
++	pgoff_t indices[PAGEVEC_SIZE];
+ 	pgoff_t next, index;
+ 	int i, freed = 0;
+ 	bool truncate_op = (lend == LLONG_MAX);
+ 
+ 	folio_batch_init(&fbatch);
+ 	next = lstart >> PAGE_SHIFT;
+-	while (filemap_get_folios(mapping, &next, end - 1, &fbatch)) {
++	while (filemap_get_hugepages(mapping, &next, end - 1, &fbatch, indices)) {
+ 		for (i = 0; i < folio_batch_count(&fbatch); ++i) {
+ 			struct folio *folio = fbatch.folios[i];
+ 			u32 hash = 0;
+-
+-			index = folio->index >> huge_page_order(h);
++			index = indices[i] >> huge_page_order(h);
+ 			hash = hugetlb_fault_mutex_hash(mapping, index);
+ 			mutex_lock(&hugetlb_fault_mutex_table[hash]);
++#ifdef CONFIG_HUGETLB_SWAP
++			if (xa_is_value(folio)) {
++				if (!hugetlbfs_free_swap(mapping, indices[i], folio, h)) {
++					next = indices[i];
++					mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++					break;
++				}
++
++				/*
++				 * For swap entries, we need to update reserve accounting
++				 * during hole punch to properly decrement global reserves.
++				 * For truncate, we count freed pages and unreserve once at end.
++				 */
++				if (!truncate_op) {
++					if (unlikely(hugetlb_unreserve_pages(inode, index,
++							    index + 1, 1)))
++						hugetlb_fix_reserve_counts(inode);
++				} else {
++					freed++;
++				}
++
++				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++				continue;
++			}
++#endif /* CONFIG_HUGETLB_SWAP */
+ 
+ 			/*
+ 			 * Remove folio that was part of folio_batch.
+@@ -698,9 +746,17 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
+ 			if (remove_inode_single_folio(h, inode, mapping, folio,
+ 							index, truncate_op))
+ 				freed++;
++#ifdef CONFIG_HUGETLB_SWAP
++			else {
++				next = indices[i];
++				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++				break;
++			}
++#endif /* CONFIG_HUGETLB_SWAP */
+ 
+ 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+ 		}
++		folio_batch_remove_exceptionals(&fbatch);
+ 		folio_batch_release(&fbatch);
+ 		cond_resched();
+ 	}
+@@ -714,9 +770,31 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
+ static void hugetlbfs_evict_inode(struct inode *inode)
+ {
+ 	struct resv_map *resv_map;
++#ifdef CONFIG_HUGETLB_SWAP
++	struct hugetlbfs_inode_info *info = HUGETLBFS_I(inode);
++#endif
+ 
+ 	remove_inode_hugepages(inode, 0, LLONG_MAX);
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++	/*
++	 * Wait while hugetlbfs_unuse() is scanning this inode.
++	 * Check list_empty under the mutex to prevent a concurrent
++	 * writepage from adding this inode between the check and the wait.
++	 */
++	mutex_lock(&hugetlbfs_swaplist_mutex);
++	while (!list_empty(&info->swaplist)) {
++		mutex_unlock(&hugetlbfs_swaplist_mutex);
++		wait_var_event(&info->stop_eviction,
++			       !atomic_read(&info->stop_eviction));
++		mutex_lock(&hugetlbfs_swaplist_mutex);
++		/* Beware of the race if we peeked too early */
++		if (!atomic_read(&info->stop_eviction))
++			list_del_init(&info->swaplist);
++	}
++	mutex_unlock(&hugetlbfs_swaplist_mutex);
++#endif /* CONFIG_HUGETLB_SWAP */
++
+ 	/*
+ 	 * Get the resv_map from the address space embedded in the inode.
+ 	 * This is the address space which points to any resv_map allocated
+@@ -730,6 +808,172 @@ static void hugetlbfs_evict_inode(struct inode *inode)
+ 	clear_inode(inode);
+ }
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++/*
++ * Find swap entries of a specific type in the hugetlbfs page cache.
++ */
++static unsigned int hugetlbfs_find_swap_entries(struct address_space *mapping,
++				pgoff_t start, struct folio_batch *fbatch,
++				pgoff_t *indices, unsigned int type)
++{
++	XA_STATE(xas, &mapping->i_pages, start);
++	struct folio *folio;
++	swp_entry_t entry;
++
++	rcu_read_lock();
++	xas_for_each(&xas, folio, ULONG_MAX) {
++		if (xas_retry(&xas, folio))
++			continue;
++
++		if (!xa_is_value(folio))
++			continue;
++
++		entry = radix_to_swp_entry(folio);
++		if (non_swap_entry(entry))
++			continue;
++		/*
++		 * Skip non-swap entries (migration, hwpoison, etc.)
++		 */
++		if (swp_type(entry) != type)
++			continue;
++
++		indices[folio_batch_count(fbatch)] = xas.xa_index;
++		if (!folio_batch_add(fbatch, folio))
++			break;
++	}
++	rcu_read_unlock();
++
++	return folio_batch_count(fbatch);
++}
++
++/*
++ * Process one inode for swapoff - swapin all pages from device 'type'.
++ * Similar to shmem_unuse_inode().
++ */
++static int hugetlbfs_unuse_inode(struct inode *inode, unsigned int type)
++{
++	struct address_space *mapping = inode->i_mapping;
++	struct hstate *h = hstate_inode(inode);
++	pgoff_t start = 0;
++	struct folio_batch fbatch;
++	pgoff_t indices[PAGEVEC_SIZE];
++	int ret = 0;
++	int i;
++	swp_entry_t entry;
++
++	do {
++		folio_batch_init(&fbatch);
++		if (!hugetlbfs_find_swap_entries(mapping, start, &fbatch,
++						 indices, type)) {
++			ret = 0;
++			break;
++		}
++
++		/*
++		 * For each swap entry found, swap it in.
++		 * We need to call hugetlbfs_unuse_swapin() for each entry.
++		 */
++		for (i = 0; i < folio_batch_count(&fbatch); i++) {
++			pgoff_t index = indices[i];
++			u32 hash;
++			void *current_val;
++
++			/*
++			 * Re-validate the entry under the fault mutex.
++			 * The entry may have changed between collection and processing.
++			 */
++			hash = hugetlb_fault_mutex_hash(mapping, index >> huge_page_order(h));
++			mutex_lock(&hugetlb_fault_mutex_table[hash]);
++
++			current_val = xa_load(&mapping->i_pages, index);
++			if (!xa_is_value(current_val)) {
++				/* Entry was swapped in or removed, skip it */
++				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++				continue;
++			}
++
++			entry = radix_to_swp_entry(current_val);
++			if (non_swap_entry(entry) || swp_type(entry) != type) {
++				/* Entry changed to different type or non-swap entry */
++				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++				continue;
++			}
++
++			/*
++			 * Call into mm/hugetlb.c to swapin this folio.
++			 * The fault mutex is held during swapin to prevent races.
++			 *
++			 * Convert the raw xarray index back to a hugetlb page
++			 * index: hugetlbfs_find_swap_entries() returns xarray
++			 * positions (already shifted by huge_page_order), but
++			 * hugetlb_add_to_page_cache() expects the unshifted
++			 * hugetlb page index and applies the shift internally.
++			 */
++			ret = hugetlbfs_unuse_swapin(inode,
++					index >> huge_page_order(h),
++					entry);
++			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
++			if (ret < 0)
++				break;
++		}
++		if (ret < 0)
++			break;
++
++		cond_resched();
++		start = indices[folio_batch_count(&fbatch) - 1] +
++			pages_per_huge_page(h);
++	} while (true);
++
++	return ret;
++}
++
++/*
++ * hugetlbfs_unuse - swapin all hugetlbfs pages from swap device 'type'
++ * Called from try_to_unuse() during swapoff.
++ * Similar to shmem_unuse().
++ */
++int hugetlbfs_unuse(unsigned int type)
++{
++	struct hugetlbfs_inode_info *info, *next;
++	int error = 0;
++
++	if (list_empty(&hugetlbfs_swaplist))
++		return 0;
++
++	mutex_lock(&hugetlbfs_swaplist_mutex);
++start_over:
++	list_for_each_entry_safe(info, next, &hugetlbfs_swaplist, swaplist) {
++		if (!atomic_read(&info->swapped)) {
++			list_del_init(&info->swaplist);
++			continue;
++		}
++
++		/*
++		 * Drop the swaplist mutex while swapping in pages.
++		 * Set stop_eviction to prevent inode eviction.
++		 */
++		atomic_inc(&info->stop_eviction);
++		mutex_unlock(&hugetlbfs_swaplist_mutex);
++
++		error = hugetlbfs_unuse_inode(&info->vfs_inode, type);
++		cond_resched();
++
++		mutex_lock(&hugetlbfs_swaplist_mutex);
++		if (atomic_dec_and_test(&info->stop_eviction))
++			wake_up_var(&info->stop_eviction);
++		if (error)
++			break;
++		if (list_empty(&info->swaplist))
++			goto start_over;
++		next = list_next_entry(info, swaplist);
++		if (!atomic_read(&info->swapped))
++			list_del_init(&info->swaplist);
++	}
++	mutex_unlock(&hugetlbfs_swaplist_mutex);
++	return error;
++}
++#endif /* CONFIG_HUGETLB_SWAP */
++
+ static void hugetlb_vmtruncate(struct inode *inode, loff_t offset)
+ {
+ 	pgoff_t pgoff;
+@@ -1309,6 +1553,13 @@ static struct inode *hugetlbfs_alloc_inode(struct super_block *sb)
+ 	/* Initialize hpool here in case of a quick call to destroy */
+ 	dynamic_pool_bind_file(p, sbinfo->hstate);
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++	/* Initialize swapoff support fields */
++	INIT_LIST_HEAD(&p->swaplist);
++	atomic_set(&p->swapped, 0);
++	atomic_set(&p->stop_eviction, 0);
++#endif
++
+ 	return &p->vfs_inode;
+ }
+ 
+@@ -1329,6 +1580,9 @@ static const struct address_space_operations hugetlbfs_aops = {
+ 	.write_end	= hugetlbfs_write_end,
+ 	.dirty_folio	= noop_dirty_folio,
+ 	.migrate_folio  = hugetlbfs_migrate_folio,
++#ifdef CONFIG_HUGETLB_SWAP
++	.writepage		= hugetlbfs_writepage,
++#endif
+ 	.error_remove_page	= hugetlbfs_error_remove_page,
+ };
+ 
+diff --git a/include/linux/hugetlb.h b/include/linux/hugetlb.h
+index 0b3df1adca68..05dbabf8abd5 100644
+--- a/include/linux/hugetlb.h
++++ b/include/linux/hugetlb.h
+@@ -605,6 +605,9 @@ struct hugetlbfs_inode_info {
+ #ifdef CONFIG_DYNAMIC_POOL
+ 	struct dynamic_pool *dpool;
+ #endif
++	struct list_head swaplist;	/* Link to hugetlbfs_swaplist */
++	atomic_t swapped;			/* Count of swapped pages */
++	atomic_t stop_eviction;		/* Prevent eviction during swapoff */
+ };
+ 
+ static inline struct hugetlbfs_inode_info *HUGETLBFS_I(struct inode *inode)
+@@ -616,6 +619,13 @@ extern const struct file_operations hugetlbfs_file_operations;
+ extern const struct vm_operations_struct hugetlb_vm_ops;
+ struct file *hugetlb_file_setup(const char *name, size_t size, vm_flags_t acct,
+ 				int creat_flags, int page_size_log);
++#ifdef CONFIG_HUGETLB_SWAP
++int hugetlbfs_unuse(unsigned int type);
++int hugetlbfs_unuse_swapin(struct inode *inode, pgoff_t index, swp_entry_t entry);
++int hugetlb_unuse_vma(struct vm_area_struct *vma, unsigned int type);
++long hugetlbfs_free_swap(struct address_space *mapping, pgoff_t index,
++			 void *radswap, struct hstate *h);
++#endif
+ 
+ static inline bool is_file_hugepages(struct file *file)
+ {
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 246ccb845605..308f513fa139 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -20,6 +20,7 @@
+ #include <linux/kernel_stat.h>
+ #include <linux/gfp.h>
+ #include <linux/mm.h>
++#include <linux/swap_slots.h>
+ #include <linux/swap.h>
+ #include <linux/swapops.h>
+ #include <linux/syscalls.h>
+@@ -857,7 +858,16 @@ noinline int __filemap_add_folio(struct address_space *mapping,
+ 	unsigned int forder = folio_order(folio);
+ 
+ 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+-	VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
++#ifdef CONFIG_HUGETLB_SWAP
++	/*
++	 * When CONFIG_HUGETLB_SWAP is enabled, hugetlb folios are
++	 * allowed to be added to the page cache, and they can be
++	 * both swap-backed and file-backed.
++	 */
++	if (!folio_test_hugetlb(folio))
++#endif
++		VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
++
+ 	mapping_set_update(&xas, mapping);
+ 
+ 	VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
+@@ -2146,6 +2156,41 @@ unsigned find_lock_entries(struct address_space *mapping, pgoff_t *start,
+ 	return folio_batch_count(fbatch);
+ }
+ 
++unsigned filemap_get_hugepages(struct address_space *mapping, pgoff_t *start,
++		pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices)
++{
++	struct inode *inode = mapping->host;
++	struct hstate *h = hstate_inode(inode);
++	XA_STATE(xas, &mapping->i_pages, *start);
++	struct folio *folio;
++
++	rcu_read_lock();
++	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
++		indices[fbatch->nr] = xas.xa_index;
++		if (!folio_batch_add(fbatch, folio)) {
++			int idx = folio_batch_count(fbatch) - 1;
++			unsigned long nr = pages_per_huge_page(h);
++			*start = indices[idx] + nr;
++			goto out;
++		}
++	}
++
++	/*
++	 * We come here when there is no page beyond @end. We take care to not
++	 * overflow the index @start as it confuses some of the callers. This
++	 * breaks the iteration when there is a page at index -1 but that is
++	 * already broken anyway.
++	 */
++	if (end == (pgoff_t)-1)
++		*start = (pgoff_t)-1;
++	else
++		*start = end + 1;
++out:
++	rcu_read_unlock();
++
++	return folio_batch_count(fbatch);
++}
++
+ /**
+  * filemap_get_folios - Get a batch of folios
+  * @mapping:	The address_space to search
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index c5241468c3cd..8137ecc66357 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -109,6 +109,9 @@ static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
+ static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
+ 
+ #ifdef CONFIG_HUGETLB_SWAP
++/* hugetlbfs swapoff support - defined in fs/hugetlbfs/inode.c */
++extern struct mutex hugetlbfs_swaplist_mutex;
++extern struct list_head hugetlbfs_swaplist;
+ /*
+  * Boot-time opt-in for hugetlb swap.  CONFIG_HUGETLB_SWAP only builds the
+  * code in; the cmdline parameter "hugetlb_swap=on" arms it.  Default off so
+@@ -6292,10 +6295,23 @@ bool hugetlbfs_pagecache_present(struct hstate *h,
+ 	struct folio *folio;
+ 
+ 	folio = filemap_get_folio(mapping, idx);
+-	if (IS_ERR(folio))
+-		return false;
+-	folio_put(folio);
+-	return true;
++	if (!IS_ERR(folio)) {
++		folio_put(folio);
++		return true;
++	}
++
++#ifdef CONFIG_HUGETLB_SWAP
++	/*
++	 * A swap-entry value in the page cache means the page is on swap, not
++	 * absent. Treat it as present so UFFDIO_COPY / fault-fill paths
++	 * refuse to overwrite it.
++	 */
++	void *entry = xa_load(&mapping->i_pages, idx);
++	if (xa_is_value(entry))
++		return true;
++#endif /* CONFIG_HUGETLB_SWAP */
++
++	return false;
+ }
+ 
+ static int __hugetlb_add_to_page_cache(struct folio *folio,
+@@ -6390,6 +6406,183 @@ static bool hugetlb_pte_stable(struct hstate *h, struct mm_struct *mm,
+ 	return same;
+ }
+ 
++#ifdef CONFIG_HUGETLB_SWAP
++static struct folio *hugetlbfs_swap_alloc_folio(struct vm_area_struct *vma,
++								struct hstate *h, unsigned long haddr,
++								swp_entry_t entry)
++{
++	struct swap_info_struct *si;
++	struct folio *new;
++
++	if (vma) {
++		new = alloc_hugetlb_folio(vma, haddr, 1);
++	} else {
++		gfp_t gfp_mask = htlb_alloc_mask(h);
++		int nid = numa_node_id();
++		new = alloc_hugetlb_folio_nodemask(h, nid, NULL, gfp_mask);
++	}
++
++	if (IS_ERR(new))
++		return new;
++
++	if (swapcache_prepare(entry, pages_per_huge_page(h))) {
++		folio_put(new);
++		return ERR_PTR(-EEXIST);
++	}
++
++	__folio_set_locked(new);
++	__folio_set_swapbacked(new);
++	new->swap = entry;
++
++	si = swp_swap_info(entry);
++	if (!data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
++		if (WARN_ON_ONCE(add_to_swap_cache(new, entry,
++			GFP_KERNEL, NULL))) {
++			goto fail_unlock;
++		}
++	}
++
++	swap_read_folio(new, NULL);
++	return new;
++
++fail_unlock:
++	put_swap_folio(new, entry);
++	folio_unlock(new);
++	folio_put(new);
++	return ERR_PTR(-ENOMEM);
++}
++
++static struct folio *hugetlbfs_do_swapin(struct address_space *mapping,
++		       pgoff_t index, swp_entry_t entry,
++		       struct vm_area_struct *vma, struct hstate *h,
++		       unsigned long haddr)
++{
++	struct swap_info_struct *si;
++	struct folio *folio;
++	struct inode *inode = mapping->host;
++	bool skip_swapcache = false;
++	int error;
++
++	si = get_swap_device(entry);
++	if (!si)
++		return ERR_PTR(-EINVAL);
++
++	folio = swap_cache_get_folio(entry, NULL, 0);
++	if (!folio) {
++		folio = hugetlbfs_swap_alloc_folio(vma, h, haddr, entry);
++		if (IS_ERR(folio)) {
++			put_swap_device(si);
++			return folio;
++		}
++		/*
++		 * hugetlbfs_swap_alloc_folio() only bypasses the swap cache
++		 * on the SWP_SYNCHRONOUS_IO path; the async path still calls
++		 * add_to_swap_cache() before returning.
++		 */
++		if (data_race(si->flags & SWP_SYNCHRONOUS_IO))
++			skip_swapcache = true;
++	}
++
++	folio_lock(folio);
++
++	folio_wait_writeback(folio);
++
++	if (!folio_test_uptodate(folio)) {
++		error = -EIO;
++		goto failed_unlock;
++	}
++
++	arch_swap_restore(folio_swap(entry, folio), folio);
++
++	error = __hugetlb_add_to_page_cache(folio, mapping, index);
++	if (error)
++		goto failed_unlock;
++
++	mutex_lock(&hugetlbfs_swaplist_mutex);
++	if (atomic_sub_return(pages_per_huge_page(h),
++		&HUGETLBFS_I(inode)->swapped) == 0)
++		list_del_init(&HUGETLBFS_I(inode)->swaplist);
++	mutex_unlock(&hugetlbfs_swaplist_mutex);
++
++	hugetlb_dec_swap_pages(h);
++
++	/*
++	 * Drop the swap cache entry after the folio is in the page cache,
++	 * mirroring shmem_swapin_folio(). __filemap_add_folio() permits
++	 * swapbacked hugetlb folios, and delete_from_swap_cache() keys off
++	 * folio->swap rather than folio->mapping.
++	 */
++	if (skip_swapcache) {
++		folio->swap.val = 0;
++		swapcache_clear(si, entry, pages_per_huge_page(h));
++	} else {
++		delete_from_swap_cache(folio);
++	}
++
++	folio_mark_dirty(folio);
++	swap_free_nr(entry, pages_per_huge_page(h));
++	put_swap_device(si);
++	folio_set_hugetlb_migratable(folio);
++
++	return folio;
++
++failed_unlock:
++	if (skip_swapcache) {
++		folio->swap.val = 0;
++		swapcache_clear(si, entry, pages_per_huge_page(h));
++	}
++	folio_unlock(folio);
++	folio_put(folio);
++	put_swap_device(si);
++	return ERR_PTR(error);
++}
++
++/*
++ * hugetlbfs_unuse_swapin - swapin a hugetlbfs page for swapoff
++ * Called from fs/hugetlbfs/inode.c:hugetlbfs_unuse_inode()
++ * This is similar to hugetlbfs_do_swapin() but works without a VMA.
++ */
++int hugetlbfs_unuse_swapin(struct inode *inode, pgoff_t index, swp_entry_t entry)
++{
++	struct address_space *mapping = inode->i_mapping;
++	struct hstate *h = hstate_inode(inode);
++	struct folio *folio;
++
++	folio = hugetlbfs_do_swapin(mapping, index, entry, NULL, h, 0);
++	if (IS_ERR(folio))
++		return PTR_ERR(folio);
++
++	folio_unlock(folio);
++	folio_put(folio);
++	return 0;
++}
++
++static struct folio *hugetlb_no_page_swapin(struct mm_struct *mm,
++		struct vm_area_struct *vma, struct address_space *mapping,
++		pgoff_t idx, pte_t *ptep, pte_t old_pte, unsigned long haddr)
++{
++	struct hstate *h = hstate_vma(vma);
++	struct folio *folio;
++	swp_entry_t entry;
++	void *xa_val;
++
++	xa_val = xa_load(&mapping->i_pages, idx << huge_page_order(h));
++	if (!xa_is_value(xa_val))
++		return ERR_PTR(-ENOENT);
++	entry = radix_to_swp_entry(xa_val);
++	if (non_swap_entry(entry))
++		return ERR_PTR(-ENOENT);
++
++	if (!hugetlb_pte_stable(h, mm, ptep, old_pte))
++		return ERR_PTR(-EAGAIN);
++
++	folio = hugetlbfs_do_swapin(mapping, idx, entry, vma, h, haddr);
++	if (IS_ERR(folio) && PTR_ERR(folio) == -EEXIST)
++		return ERR_PTR(-EAGAIN);	/* concurrent swapin race */
++	return folio;
++}
++#endif /* CONFIG_HUGETLB_SWAP */
++
+ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 			struct vm_area_struct *vma,
+ 			struct address_space *mapping, pgoff_t idx,
+@@ -6429,6 +6622,37 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 		size = i_size_read(mapping->host) >> huge_page_shift(h);
+ 		if (idx >= size)
+ 			goto out;
++
++#ifdef CONFIG_HUGETLB_SWAP
++		/*
++		 * Peek at the page-cache slot before deciding userfaultfd
++		 * action: a swap-entry value means the page was reclaimed,
++		 * not "missing".  Delivering MISSING here would let userspace
++		 * UFFDIO_COPY orphan the swap slot and overwrite the prior
++		 * contents.  Mirror shmem_get_folio_gfp() which swaps in first
++		 * and only routes never-populated slots through MISSING.
++		 */
++		folio = hugetlb_no_page_swapin(mm, vma, mapping, idx, ptep,
++					       old_pte, haddr);
++		if (!IS_ERR(folio))
++			goto mapping;			/* swapped back in */
++		if (PTR_ERR(folio) != -ENOENT) {
++			if (PTR_ERR(folio) == -EAGAIN) {
++				ret = 0;
++				goto out;
++			}
++			if (PTR_ERR(folio) == -ENOMEM ||
++				PTR_ERR(folio) == -ENOSPC) {
++				ret = hugetlb_pte_stable(h, mm, ptep, old_pte) ?
++				      vmf_error(PTR_ERR(folio)) : 0;
++				goto out;
++			}
++
++			ret = VM_FAULT_SIGBUS;
++			goto out;
++		}
++#endif /* CONFIG_HUGETLB_SWAP */
++
+ 		/* Check for page in userfault range */
+ 		if (userfaultfd_missing(vma)) {
+ 			/*
+@@ -6544,7 +6768,9 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 							VM_UFFD_MINOR);
+ 		}
+ 	}
+-
++#ifdef CONFIG_HUGETLB_SWAP
++mapping:
++#endif
+ 	/*
+ 	 * If we are going to COW a private mapping later, we examine the
+ 	 * pending reservations for this page now. This will ensure that
+@@ -8491,6 +8717,95 @@ EXPORT_SYMBOL_GPL(hugetlb_pool_alloc_size);
+ #endif
+ 
+ #ifdef CONFIG_HUGETLB_SWAP
++/*
++ * Replace item expected in xarray by a new item, while holding xa_lock.
++ */
++static int hugetlb_replace_entry(struct address_space *mapping,
++			pgoff_t index, void *expected, void *replacement,
++			unsigned int order)
++{
++	XA_STATE_ORDER(xas, &mapping->i_pages, index, order);
++	void *item;
++
++	VM_BUG_ON(!expected);
++	VM_BUG_ON(!replacement);
++	item = xas_load(&xas);
++	if (item != expected)
++		return -ENOENT;
++	xas_store(&xas, replacement);
++	return 0;
++}
++
++/*
++ * Somewhat like filemap_remove_folio, but substitutes swap for @folio
++ */
++static void hugetlb_delete_from_page_cache(struct folio *folio, void *radswap)
++{
++	struct address_space *mapping = folio->mapping;
++	long nr = folio_nr_pages(folio);
++	int error;
++
++	xa_lock_irq(&mapping->i_pages);
++	error = hugetlb_replace_entry(mapping, folio->index, folio, radswap,
++				      folio_order(folio));
++	folio->mapping = NULL;
++	mapping->nrpages -= nr;
++	xa_unlock_irq(&mapping->i_pages);
++	folio_put_refs(folio, nr);
++	BUG_ON(error);
++}
++
++int hugetlbfs_writepage(struct page *page, struct writeback_control *wbc)
++{
++	struct folio *folio = page_folio(page);
++	struct address_space *mapping = folio->mapping;
++	struct inode *inode = mapping->host;
++	struct hugetlbfs_inode_info *info = HUGETLBFS_I(inode);
++	swp_entry_t swap;
++	int nr_pages = folio_nr_pages(folio);
++
++	swap = folio_alloc_swap_huge(folio);
++	if (!swap.val)
++		goto redirty;
++
++	/*
++	 * Add inode to hugetlbfs_unuse()'s list of swapped-out inodes,
++	 * if it's not already there. Do this before adding to swap cache.
++	 */
++	mutex_lock(&hugetlbfs_swaplist_mutex);
++	if (list_empty(&info->swaplist))
++		list_add(&info->swaplist, &hugetlbfs_swaplist);
++
++	if (add_to_swap_cache(folio, swap,
++			__GFP_HIGH | __GFP_NOMEMALLOC | __GFP_NOWARN,
++			NULL) != 0) {
++		goto put_swap;
++	}
++	atomic_add(nr_pages, &info->swapped);
++	swap_shmem_alloc(swap, nr_pages);
++	hugetlb_delete_from_page_cache(folio, swp_to_radix_entry(swap));
++	hugetlb_inc_swap_pages(folio_hstate(folio));
++	mutex_unlock(&hugetlbfs_swaplist_mutex);
++	return swap_writepage(&folio->page, wbc);
++
++put_swap:
++	/*
++	 * If the folio was added to swap cache (via add_to_swap_cache), we need
++	 * to delete it from swap cache. Otherwise, just put the swap slot.
++	 */
++	if (folio_test_swapcache(folio))
++		delete_from_swap_cache(folio);
++	else
++		put_swap_folio(folio, swap);
++	mutex_unlock(&hugetlbfs_swaplist_mutex);
++redirty:
++	folio_redirty_for_writepage(wbc, folio);
++	if (wbc->for_reclaim)
++		return AOP_WRITEPAGE_ACTIVATE;	/* Return with folio locked */
++	folio_unlock(folio);
++	return 0;
++}
++
+ void hugetlb_inc_swap_pages(struct hstate *h)
+ {
+ 	spin_lock_irq(&hugetlb_lock);
+@@ -8509,6 +8824,129 @@ void hugetlb_dec_swap_pages(struct hstate *h)
+ 	spin_unlock_irq(&hugetlb_lock);
+ }
+ 
++/*
++ * Remove swap entry from page cache, free the swap and its page cache.
++ * Returns the number of HugeTLB pages freed. 0 means entry not found in
++ * the XArray (0 pages being freed).
++ */
++long hugetlbfs_free_swap(struct address_space *mapping, pgoff_t index,
++			 void *radswap, struct hstate *h)
++{
++	XA_STATE_ORDER(xas, &mapping->i_pages, index, huge_page_order(h));
++	swp_entry_t entry = radix_to_swp_entry(radswap);
++	struct swap_info_struct *si;
++	struct folio *folio;
++	void *old;
++
++	xas_lock_irq(&xas);
++	old = xas_load(&xas);
++	if (old != radswap) {
++		xas_unlock_irq(&xas);
++		return 0;
++	}
++	xas_store(&xas, NULL);
++	xas_unlock_irq(&xas);
++
++	free_swap_and_cache_nr(entry, pages_per_huge_page(h));
++
++	si = get_swap_device(entry);
++	if (si) {
++		folio = filemap_get_folio(swap_address_space(entry),
++					  swp_offset(entry));
++		if (!IS_ERR(folio)) {
++			folio_lock(folio);
++			folio_wait_writeback(folio);
++			if (folio_test_swapcache(folio))
++				delete_from_swap_cache(folio);
++			folio_unlock(folio);
++			folio_put(folio);
++		}
++		put_swap_device(si);
++	}
++
++	hugetlb_dec_swap_pages(h);
++	return 1;
++}
++
++/*
++ * hugetlb_unuse_vma - swapin anonymous hugetlb pages from one VMA
++ * Called from hugetlb_unuse_mm() during swapoff.
++ */
++int hugetlb_unuse_vma(struct vm_area_struct *vma, unsigned int type)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	struct hstate *h = hstate_vma(vma);
++	unsigned long addr = vma->vm_start;
++	unsigned long end = vma->vm_end;
++	unsigned long sz = huge_page_size(h);
++	unsigned long last_addr_mask = hugetlb_mask_last_page(h);
++	struct address_space *mapping;
++	pte_t *ptep;
++	pte_t pte;
++	spinlock_t *ptl;
++	swp_entry_t entry;
++	int ret = 0;
++	u32 hash;
++	pgoff_t idx;
++	vm_fault_t error;
++
++	for (; addr < end; addr += sz) {
++start:
++		ptep = hugetlb_walk(vma, addr, sz);
++		if (!ptep) {
++			addr |= last_addr_mask;
++			continue;
++		}
++
++		ptl = huge_pte_lock(h, mm, ptep);
++		pte = huge_ptep_get(ptep);
++
++		/* Check if this is a swap entry */
++		if (!is_swap_pte(pte)) {
++			spin_unlock(ptl);
++			continue;
++		}
++
++		entry = pte_to_swp_entry(pte);
++
++		/* Skip migration, hwpoison, device entries */
++		if (non_swap_entry(entry)) {
++			spin_unlock(ptl);
++			continue;
++		}
++
++		/* Check if this entry is from the swap device we're disabling */
++		if (swp_type(entry) != type) {
++			spin_unlock(ptl);
++			continue;
++		}
++
++		spin_unlock(ptl);
++
++		mapping = vma->vm_file->f_mapping;
++		idx = vma_hugecache_offset(h, vma, addr);
++		hash = hugetlb_fault_mutex_hash(mapping, idx);
++		/*
++		 * We found a swap entry matching the type. Need to swap it in.
++		 * This is similar to the swapin code in hugetlb_fault().
++		 */
++		mutex_lock(&hugetlb_fault_mutex_table[hash]);
++		hugetlb_vma_lock_read(vma);
++		error = hugetlb_anon_swapin(mm, vma, addr, ptep, pte, 0, hash);
++		/* hugetlb_anon_swapin() releases vma_lock and fault_mutex */
++		if (error) {
++			ret = vm_fault_to_errno(error, 0);
++			break;
++		} else {
++			/* Sometimes, hugetlb_anon_swapin() would return 0 for retry */
++			cond_resched();
++			goto start;
++		}
++	}
++
++	return ret;
++}
++
+ void hugetlb_putback_after_reclaim(struct folio *folio)
+ {
+ 	folio_putback_active_hugetlb(folio);
+diff --git a/mm/swapfile.c b/mm/swapfile.c
+index 3a102ee31e6e..c5aa50038586 100644
+--- a/mm/swapfile.c
++++ b/mm/swapfile.c
+@@ -2202,6 +2202,12 @@ static int unuse_mm(struct mm_struct *mm, unsigned int type)
+ 			ret = unuse_vma(vma, type);
+ 			if (ret)
+ 				break;
++#ifdef CONFIG_HUGETLB_SWAP
++		} else if (vma->anon_vma && is_vm_hugetlb_page(vma)) {
++			ret = hugetlb_unuse_vma(vma, type);
++			if (ret)
++				break;
++#endif /* CONFIG_HUGETLB_SWAP */
+ 		}
+ 
+ 		cond_resched();
+@@ -2260,7 +2266,11 @@ static int try_to_unuse(unsigned int type)
+ 	retval = shmem_unuse(type);
+ 	if (retval)
+ 		return retval;
+-
++#ifdef CONFIG_HUGETLB_SWAP
++	retval = hugetlbfs_unuse(type);
++	if (retval)
++		return retval;
++#endif
+ 	prev_mm = &init_mm;
+ 	mmget(prev_mm);
+ 
+-- 
+2.43.0
+

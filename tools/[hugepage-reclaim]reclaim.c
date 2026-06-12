@@ -150,17 +150,18 @@ void vm_heat_update(HeatManager *mgr,
 
 static double pressure_factor(PressureLevel level)
 {
+    /* 计算回收比例 */
     switch (level) {
-    case PRESSURE_LOW:
-        return 0.3;
-    case PRESSURE_MEDIUM:
-        return 0.5;
-    case PRESSURE_HIGH:
-        return 0.7;
-    case PRESSURE_CRITICAL:
-        return 0.9;
-    default:
-        return 0.1;
+        case PRESSURE_LOW:
+            return 0.3;
+        case PRESSURE_MEDIUM:
+            return 0.5;
+        case PRESSURE_HIGH:
+            return 0.7;
+        case PRESSURE_CRITICAL:
+            return 0.9;
+        default:
+            return 0.1;
     }
 }
 
@@ -182,6 +183,7 @@ uint64_t vm_calculate_reclaim_pages(VMHeatInfo *vm,
     uint64_t max_reclaim;
     pthread_mutex_lock(&vm->lock);
 
+    /* 每台虚拟机至少保留20%内存 */
     reclaim_pages = vm->reclaimable_pages * pressure_factor(pressure);
     max_reclaim = vm->total_pages - vm->total_pages / 5;
 
@@ -190,26 +192,6 @@ uint64_t vm_calculate_reclaim_pages(VMHeatInfo *vm,
 
     pthread_mutex_unlock(&vm->lock);
     return reclaim_pages;
-}
-
-VMHeatInfo *select_coldest_vm(HeatManager *mgr)
-{
-    VMHeatInfo *best = NULL;
-    double best_cold = 0;
-    pthread_rwlock_rdlock(&mgr->rwlock);
-    VMHeatInfo *vm = mgr->head;
-
-    while (vm) {
-        pthread_mutex_lock(&vm->lock);
-        if (vm->cold_score > best_cold) {
-            best = vm;
-            best_cold = vm->cold_score;
-        }
-        pthread_mutex_unlock(&vm->lock);
-        vm = vm->next;
-    }
-    pthread_rwlock_unlock(&mgr->rwlock);
-    return best;
 }
 
 /* 大顶堆 反向排序 */
@@ -647,6 +629,10 @@ void heat_manager_sync_vms(HeatManager *mgr)
          * 新VM
          */
         VMHeatInfo *new_vm = calloc(1, sizeof(VMHeatInfo));
+        if (!new_vm) {
+            LOG_ERR("Failed to allocate VMHeatInfo for pid %d\n", pid);
+            continue;
+        }
         new_vm->pid = pid;
         new_vm->alive = true;
         new_vm->heat_score = 0.5;
@@ -766,8 +752,8 @@ void monitor_and_reclaim(HeatManager *mgr)
 
             pthread_t tids[128];
             int tcount = 0;
-            VMHeatInfo *vm = mgr->head;
             pthread_rwlock_rdlock(&mgr->rwlock);
+            VMHeatInfo *vm = mgr->head;
 
             while (vm) {
                 pid_t pid = vm->pid;
@@ -789,6 +775,14 @@ void monitor_and_reclaim(HeatManager *mgr)
                 }
 
                 reclaim_task_t *task = malloc(sizeof(*task));
+                if (!task) {
+                    LOG_ERR("Failed to allocate reclaim task\n");
+                    pthread_mutex_lock(&vm->lock);
+                    vm->in_reclaim--;
+                    pthread_mutex_unlock(&vm->lock);
+                    vm = vm->next;
+                    continue;
+                }
                 task->vm = vm;
                 task->node = node;
                 task->reclaim_pages = vm_calculate_reclaim_pages(vm, pressure);
@@ -800,6 +794,15 @@ void monitor_and_reclaim(HeatManager *mgr)
                     free(task);
                     vm = vm->next;
                     continue;
+                }
+
+                if (tcount >= 128) {
+                    LOG_ERR("Worker count exceeded limit\n");
+                    pthread_mutex_lock(&vm->lock);
+                    vm->in_reclaim--;
+                    pthread_mutex_unlock(&vm->lock);
+                    free(task);
+                    break;
                 }
 
                 if (pthread_create(&tids[tcount], NULL,
@@ -858,6 +861,7 @@ int main()
 
     if (pthread_create(&heat_tid, NULL, heat_sampling_thread, &mgr)) {
         LOG_ERR("create heat thread failed\n");
+        pthread_rwlock_destroy(&mgr.rwlock);
         return -1;
     }
     monitor_and_reclaim(&mgr);
