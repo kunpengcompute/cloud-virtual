@@ -46,7 +46,7 @@
    10. `[cacheinfo-configuration]0010-libvirt-fix-Wshadow-error-by-renaming-local-variable.patch`
    11. `[cacheinfo-configuration]0011-libvirt-fix-symbol-sorting-in-libvirt_private.syms-m.patch`
 
-3. qemu需要获取以下12个补丁文件，并保持应用顺序不变。
+3. qemu需要获取以下13个补丁文件，并保持应用顺序不变。
 
    1. `[cacheinfo-configuration]0001-qapi-qom-Define-cache-enumeration-and-properties-for.patch`
    2. `[cacheinfo-configuration]0002-qemu-Support-specifying-the-cache-size-presented-to-.patch`
@@ -60,6 +60,7 @@
    10. `[cacheinfo-configuration]0010-qemu-arm64-add-cache_supported-for-all-cache-levels-.patch`
    11. `[cacheinfo-configuration]0011-qemu-arm64-fix-CLIDR-injection-write-to-cpreg_values.patch`
    12. `[cacheinfo-configuration]0012-qemu-arm64-move-CLIDR-injection-after-kvm_arm_writab.patch`
+   13. `[cacheinfo-configuration-bugfix]0001-qemu-arm64-replace-malloc-with-g_new0-in-PPTT-cache-.patch`
 
 ### 获取qemu源码和libvirt源码
 1. 切换到qemu-8.2.0分支并克隆qemu源码。
@@ -91,6 +92,7 @@
     git am --reject ~/patch目录/[cacheinfo-configuration]0010-qemu-arm64-add-cache_supported-for-all-cache-levels-.patch
     git am --reject ~/patch目录/[cacheinfo-configuration]0011-qemu-arm64-fix-CLIDR-injection-write-to-cpreg_values.patch
     git am --reject ~/patch目录/[cacheinfo-configuration]0012-qemu-arm64-move-CLIDR-injection-after-kvm_arm_writab.patch
+    git am --reject ~/patch目录/[cacheinfo-configuration-bugfix]0001-qemu-arm64-replace-malloc-with-g_new0-in-PPTT-cache-.patch
    ```
 3. 在libvirt源码根目录执行以下命令，按邮件补丁流合入VF ITS补丁。
    ```bash

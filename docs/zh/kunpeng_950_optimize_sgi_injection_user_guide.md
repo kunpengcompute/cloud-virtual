@@ -56,7 +56,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 2. 需要获取以下补丁文件。
 
-   `[kvm]arm64:vgic-v3:Optimize_affinity-based_SGI_injection.patch`
+   `[kvm]arm64-vgic-v3-Optimize_affinity-based_SGI_injection.patch`
 
 ### 获取目标内核源码
 
