@@ -25,6 +25,7 @@
 ## 软件编译
 
 ### 获取补丁
+
 1. cacheinfo补丁获取链接如下。
 
     | 项目 | 补丁链接 |
@@ -63,22 +64,29 @@
    13. `[cacheinfo-configuration-bugfix]0001-qemu-arm64-replace-malloc-with-g_new0-in-PPTT-cache-.patch`
 
 ### 获取qemu源码和libvirt源码
+
 1. 切换到qemu-8.2.0分支并克隆qemu源码。
+
     ```bash
     git clone https://gitcode.com/openeuler/qemu.git -b qemu-8.2.0
     ```
+
 2. 切换到libvirt-9.10.0分支并克隆libvirt源码。
+
     ```bash
     git clone https://gitcode.com/openeuler/libvirt.git -b libvirt-9.10.0
     ```
 
 ### 合入qemu和libvirt补丁
+
 1. 合入补丁前，建议确认源码目录干净，若命令没有输出，表示当前工作区没有未提交修改。
 
    ```bash
    git status --short
    ```
+
 2. 在qemu源码根目录执行以下命令，按邮件补丁流合入VF ITS补丁。
+
    ```bash
     git am --reject ~/patch目录/[cacheinfo-configuration]0001-qapi-qom-Define-cache-enumeration-and-properties-for.patch                         
     git am --reject ~/patch目录/[cacheinfo-configuration]0002-qemu-Support-specifying-the-cache-size-presented-to-.patch                         
@@ -94,7 +102,9 @@
     git am --reject ~/patch目录/[cacheinfo-configuration]0012-qemu-arm64-move-CLIDR-injection-after-kvm_arm_writab.patch
     git am --reject ~/patch目录/[cacheinfo-configuration-bugfix]0001-qemu-arm64-replace-malloc-with-g_new0-in-PPTT-cache-.patch
    ```
+
 3. 在libvirt源码根目录执行以下命令，按邮件补丁流合入VF ITS补丁。
+
    ```bash
     git am --reject ~/patch目录/[cacheinfo-configuration]0001-libvirt-Support-specifying-the-cache-size-presented-.patch
     git am --reject ~/patch目录/[cacheinfo-configuration]0002-fix-some-enumeration-value-not-handled-in-switch.patch
@@ -112,12 +122,15 @@
 ### 编译qemu和libvirt
 
 1. 编译qemu。
+
     ```bash
     mkdir -p build && cd build
     ../configure --disable-docs --target-list=aarch64-softmmu --disable-werror
     make -j 100
     ```
+
 2. 编译libvirt。
+
     ```bash
     meson setup build --prefix=/usr -Ddocs=disabled
     ninja -C build -j 100
@@ -129,10 +142,13 @@
 通过libvirt XML配置缓存信息。
 
 1. 编辑虚拟机配置文件。
+
     ```bash
     virsh edit <vm name>
     ```
+
     鲲鹏920新型号处理器大规格虚拟机参考如下示例配置缓存信息（示例参数仅供参考，请以实际场景为准）。
+
     ```xml
         ...
         <devices>
@@ -147,7 +163,9 @@
         </cpu>
         ...
     ```
+
     鲲鹏950处理器大规格虚拟机参考如下示例配置缓存信息（示例参数仅供参考，请以实际场景为准）。
+
     ```xml
         ...
         <devices>
@@ -162,6 +180,7 @@
         </cpu>
         ...
     ```
+
     **表1** 参数说明
     
     | 参数 | 说明                                                                                    | 取值范围 |
