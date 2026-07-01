@@ -8,7 +8,6 @@ This document details the procedure for performing unidirectional cross-generati
 
 VM live migration allows a VM to be migrated from one physical host to another without interrupting the VM running. The key benefit of cross-generation migration lies in its ability to maintain VM operation and service continuity during hardware upgrades by supporting migration between different hardware generations. Successful implementation typically requires sufficient compatibility between source and target hardware platforms, and hardware discrepancy tolerance at the VM OS and application layers. While technically challenging, this capability significantly enhances operational flexibility for data centers and cloud services by ensuring continuous service availability.
 
-
 ### Other Information<a name="EN-US_TOPIC_0000002518251592"></a>
 
 Before configuring this feature, learn about the constraints and application scenarios.
@@ -30,9 +29,6 @@ The application environment must meet the hardware and software requirements.
 
 VM live migration applies to load balancing, hardware maintenance, and disaster recovery (DR) high availability (HA) scenarios. It dynamically adjusts VM distribution to prevent a single physical host from being overloaded and improve resource utilization. VMs can be migrated without interrupting services to facilitate the maintenance or upgrade of the source host. In addition, when a host is faulty or its performance deteriorates, VMs can be quickly migrated to ensure service continuity.
 
-
-
-
 ## Installation and Usage<a name="EN-US_TOPIC_0000002549771343"></a>
 
 ### Environment Requirements<a name="EN-US_TOPIC_0000002549891357"></a>
@@ -50,7 +46,6 @@ This document provides guidance based on the openEuler OS. Before performing ope
 |Source processor|Kunpeng 920|
 |Target processor|New Kunpeng 920 processor model|
 
-
 **iBMC and BIOS Version Requirements<a name="section4793193042413"></a>**
 
 [**Table 2**](#ibmc-and-bios-version-requirements) lists the iBMC and BIOS version requirements.
@@ -63,7 +58,6 @@ This document provides guidance based on the openEuler OS. Before performing ope
 |Source BIOS|V5.29 or later|
 |Target iBMC|V5.0 or later|
 |Target BIOS|V20.0 or later|
-
 
 **OS and Software Requirements<a name="section153345522323"></a>**
 
@@ -92,7 +86,6 @@ To ensure SSBS feature consistency between the source and target servers, upgrad
 
     ![](figures/en-us_image_0000002549771353.png)
 
-
 #### Configuring the Target Server BIOS<a name="EN-US_TOPIC_0000002518411502"></a>
 
 The Kunpeng 920 server does not support GICv4.1 and the system counter frequency is 100 MHz. Therefore, you need to modify the BIOS options of the target new Kunpeng 920 server model.
@@ -106,25 +99,25 @@ The Kunpeng 920 server does not support GICv4.1 and the system counter frequency
 
     ![](figures/en-us_image_0000002518251602.png)
 
-
 ### Compiling and Installing the Server Kernel<a name="EN-US_TOPIC_0000002518251594"></a>
 
 Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the target new Kunpeng 920 server model, and compile and install the customized kernel 6.6.
 
 >![](public_sys-resources/icon-notice.gif) **NOTICE:**
->-   The feature installation involves system file modification. By default, all operations during the installation are performed by the `root` user. If you are a non-`root` user, ensure that you have corresponding permissions.
->-   Modify paths and file names involved in the kernel compilation and installation as required.
->-   Configure the Yum repository in advance.
+>
+>- The feature installation involves system file modification. By default, all operations during the installation are performed by the `root` user. If you are a non-`root` user, ensure that you have corresponding permissions.
+>- Modify paths and file names involved in the kernel compilation and installation as required.
+>- Configure the Yum repository in advance.
 
 1. Install the dependencies required for kernel compilation.
 
-    ```
+    ```shell
     yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build
     ```
 
 2. Obtain the open-source code of the kernel and go to tag `6.6.0-72.0.0`.
 
-    ```
+    ```shell
     cd /home
     git clone https://gitee.com/openeuler/kernel.git
     cd kernel
@@ -134,7 +127,7 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
 
 3. Obtain the kernel patch and apply the patch to the open-source code.
 
-    ```
+    ```shell
     cd /home
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     cp /home/boostkit_-virtualization/tools/[live-migration]apply_patches.py /home/kernel/
@@ -144,7 +137,7 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
 
 4. Copy the current system configuration file as the compilation configuration file and modify it as follows:
 
-    ```
+    ```shell
     cp /boot/config-6.6.0-72.0.0.76.oe2403sp1.aarch64 .config
     vim .config
     CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -152,13 +145,13 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
 
 5. Generate the compilation configuration. After the execution is successful, exit directly.
 
-    ```
+    ```shell
     make menuconfig
     ```
 
 6. Compile the kernel.
 
-    ```
+    ```shell
     make binrpm-pkg -j
     ```
 
@@ -167,14 +160,14 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
     >![](public_sys-resources/icon-note.gif) **NOTE:**
     >Modify the path for generating the compiled RPM package as required.
 
-    ```
+    ```shell
     rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-6.6.0-1.aarch64.rpm --force
     grub2-mkconfig -o /boot/efi/EFI/openEuler/grub.cfg
     ```
 
 8. Modify the kernel startup parameter.
 
-    ```
+    ```shell
     vi /boot/efi/EFI/openEuler/grub.cfg
     ```
 
@@ -182,13 +175,13 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
 
     ![](figures/en-us_image_0000002549771349.png)
 
-    ```
+    ```txt
     arm64.nopauth console=tty0 selinux=0 iommu.passthrough=1 pci=realloc
     ```
 
     Set the new kernel as the default boot kernel and check whether the setting is successful.
 
-    ```
+    ```txt
     grub2-set-default "openEuler (6.6.0+) 24.03 (LTS-SP1)"
     grub2-editenv list
     ```
@@ -197,7 +190,7 @@ Install openEuler 24.03 LTS SP1 on both the source Kunpeng 920 server and the ta
 
 9. Restart the system, enter the BMC, and switch to the new kernel.
 
-    ```
+    ```shell
     reboot
     ```
 
@@ -207,7 +200,7 @@ Compile and install the customized QEMU 8.2.0 on both the source Kunpeng 920 ser
 
 1. Obtain the open-source code of QEMU and go to branch `qemu-8.2.0`.
 
-    ```
+    ```shell
     cd /home
     git clone https://gitee.com/openeuler/qemu.git
     cd qemu
@@ -217,7 +210,7 @@ Compile and install the customized QEMU 8.2.0 on both the source Kunpeng 920 ser
 
 2. Obtain the QEMU patch and apply the patch to the open-source code.
 
-    ```
+    ```shell
     cd /home
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     cp /home/boostkit_-virtualization/tools/[live-migration]apply_patches.py /home/qemu/
@@ -227,7 +220,7 @@ Compile and install the customized QEMU 8.2.0 on both the source Kunpeng 920 ser
 
 3. Configure QEMU compilation options.
 
-    ```
+    ```shell
     mkdir build
     cd build
     ../configure --prefix=/usr/local/qemu-8.2.0 --disable-werror --enable-spice --enable-spice-protocol --target-list=aarch64-softmmu --cc="gcc" --extra-cflags="-Wno-error" --disable-docs --enable-virtfs --enable-numa --enable-kvm
@@ -235,7 +228,7 @@ Compile and install the customized QEMU 8.2.0 on both the source Kunpeng 920 ser
 
 4. Compile and install QEMU. If the compilation fails, see the important notes at the end of this document.
 
-    ```
+    ```shell
     make -j && make install
     ```
 
@@ -243,40 +236,40 @@ Compile and install the customized QEMU 8.2.0 on both the source Kunpeng 920 ser
 
 Use Yum to install libvirt on both the source and target servers.
 
-```
+```shell
 yum -y install libvirt edk2-aarch64.noarch
 ```
-
 
 ### Modifying the System and libvirt Configurations<a name="EN-US_TOPIC_0000002518251596"></a>
 
 **Modifying System Configurations<a name="section4375102616228"></a>**
 
 >![](public_sys-resources/icon-note.gif) **NOTE:**
->-   Change the IP address and host name as required.
->-   Before modifying the configurations, disable the security protection measures of the source and target physical machines.
+>
+>- Change the IP address and host name as required.
+>- Before modifying the configurations, disable the security protection measures of the source and target physical machines.
 
 1. On the source and target physical machines, modify the `/etc/selinux/config` file as follows and restart to disable SELinux.
 
-    ```
+    ```xml
     SELINUX=disabled
     ```
 
 2. Disable the firewall on the target physical machine.
 
-    ```
+    ```shell
     systemctl stop firewalld
     ```
 
 3. Change the host name of the target physical machine.
 
-    ```
+    ```shell
     hostname target
     ```
 
 4. Modify the `/etc/hosts` file on the source physical machine and add the IP address and host name of the target physical machine. The IP address must be the same as that used in the migration command.
 
-    ```
+    ```shell
     XXX.XXX.XXX.XXX target
     ```
 
@@ -289,7 +282,7 @@ Modify the `/etc/libvirt/libvirtd.conf` file on the target physical machine to e
 
 1. Modify the `/etc/libvirt/libvirtd.conf` file on the target server to enable libvirt to monitor the VM status during live migration.
 
-    ```
+    ```xml
     listen_tls = 0
     listen_tcp = 1
     tcp_port = "16509"
@@ -299,28 +292,28 @@ Modify the `/etc/libvirt/libvirtd.conf` file on the target physical machine to e
 
 2. Restart the libvirtd service to enable listening.
 
-    ```
+    ```shell
     systemctl stop libvirtd 
     systemctl enable --now libvirtd-tcp.socket
     systemctl daemon-reload
     systemctl restart libvirtd
     ```
 
-
 ### Setting Up the Network Bridge<a name="EN-US_TOPIC_0000002549771347"></a>
 
 In this test environment, Kunpeng 920 cross-generation VM live migration uses the Linux bridge for network communication.
 
 >![](public_sys-resources/icon-notice.gif) **NOTICE:**
->-   You need to configure a network bridge for both the source and target physical machines.
->-   If the source physical machine is directly connected to the target physical machine, you do not need to configure the gateway.
->-   The network bridge name of the source physical machine must be the same as that of the target.
->-   The source and target physical machines must be in the same network segment.
->-   The IP address of the VM must be in the same network segment as that of the network bridge.
+>
+>- You need to configure a network bridge for both the source and target physical machines.
+>- If the source physical machine is directly connected to the target physical machine, you do not need to configure the gateway.
+>- The network bridge name of the source physical machine must be the same as that of the target.
+>- The source and target physical machines must be in the same network segment.
+>- The IP address of the VM must be in the same network segment as that of the network bridge.
 
 1. Create a network bridge interface.
 
-    ```
+    ```shell
     brctl addbr <Network_bridge_name>
     ```
 
@@ -328,26 +321,26 @@ In this test environment, Kunpeng 920 cross-generation VM live migration uses th
 
     If the NIC has an IP address, clear the IP address.
 
-    ```
+    ```shell
     ip addr flush dev <NIC_name>
     ```
 
     Bind the NIC to the network bridge.
 
-    ```
+    ```shell
     ip link set <NIC_name> master <Network_bridge_name>
     ```
 
 3. Start the interface.
 
-    ```
+    ```shell
     sudo ip link set <Network_bridge_name> up
     sudo ip link set <NIC_name> up
     ```
 
 4. Check whether the binding is successful.
 
-    ```
+    ```shell
     brctl show
     ```
 
@@ -360,14 +353,14 @@ In this test environment, Kunpeng 920 cross-generation VM live migration uses th
 
 5. Configure the IP address and gateway of the network bridge.
 
-    ```
+    ```shell
     ip addr add <IP_address> dev <Network_bridge_name>
     ip route add default via <Gateway_IP_address> dev <Network_bridge_name>
     ```
 
 6. Modify the VM XML file to bind the network bridge.
 
-    ```
+    ```xml
     virsh edit <VM_name>
     <interface type='bridge'>
       <mac address='<MAC_address>'/>
@@ -379,7 +372,7 @@ In this test environment, Kunpeng 920 cross-generation VM live migration uses th
 
     The command for configuring the IP address is as follows:
 
-    ```
+    ```shell
     ip addr add <IP_address> dev <Virtual_NIC_name>
     ```
 
@@ -387,7 +380,7 @@ In this test environment, Kunpeng 920 cross-generation VM live migration uses th
 
     On the target physical machine, run the following command to check whether the VM network is normal. If the network connection is normal, the network is successfully set up.
 
-    ```
+    ```shell
     ping <Virtual_NIC_IP_address>
     ```
 
@@ -397,19 +390,19 @@ The following uses a VM with 4 vCPUs and 8 GB memory as an example. Modify the X
 
 1. Edit the XML file of the source VM.
 
-    ```
+    ```shell
     virsh edit <VM_name>
     ```
 
 2. Specify the path of the QEMU binary file used for VM startup.
 
-    ```
+    ```xml
     <emulator>/usr/local/qemu-8.2.0/bin/qemu-system-aarch64</emulator>
     ```
 
 3. Modify the QEMU startup parameters to unify the vCPU features, number of PMU counters, types of PMU statistical events, and Errata management.
 
-    ```
+    ```xml
      <domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
        <qemu:commandline>
           <qemu:arg value='-cpu'/>
@@ -418,8 +411,6 @@ The following uses a VM with 4 vCPUs and 8 GB memory as an example. Modify the X
           <qemu:arg value='pmcr-n=8,denied-events-type.0=bus-cycles,denied-events-type.1=l1i-cache-lmiss,denied-events-type.2=l3d-cache-allocate,denied-events-type.3=l3d-cache-refill,denied-events-type.4=l3d-cache,denied-events-type.5=l1d-cache-lmiss-rd,denied-events-type.6=op-spec,denied-events-type.7=stall,denied-events-type.8=stall-slot-backend,denied-events-type.9=stall-slot-frontend,denied-events-type.10=stall-slot,denied-events-type.11=ldst-align-lat,denied-events-type.12=ld-align-lat,denied-events-type.13=st-align-lat,x-target-impl-cpus=0x481fd010:0x0-0x480fd020:0x0'/>
        </qemu:commandline>
     ```
-
-
 
 ## Live Migration Test<a name="EN-US_TOPIC_0000002549891361"></a>
 
@@ -432,7 +423,7 @@ The following uses a VM with 4 vCPUs and 8 GB memory as an example. Modify the X
 
 Redis is used only to verify service continuity during live migration. You can use any Redis version. The following uses 6.2.7 as an example, which is the version provided by the Yum repository. Run the following command on the VM to install it:
 
-```
+```shell
 yum install -y redis6
 ```
 
@@ -440,7 +431,7 @@ yum install -y redis6
 
 Perf is a system performance analysis tool. It is used to verify the live migration of VM PMU events. You can use the version provided by the Yum repository. Run the following command on the VM to install it:
 
-```
+```shell
 yum install -y perf
 ```
 
@@ -451,13 +442,13 @@ yum install -y perf
 
 1. Start the source VM.
 
-    ```
+    ```shell
     virsh start <VM_name> --console
     ```
 
 2. Modify the Redis configuration file `/etc/redis/redis.conf`.
 
-    ```
+    ```shell
     bind <VM_NIC_IP_address>
     protected-mode no
     daemonize no
@@ -465,26 +456,26 @@ yum install -y perf
 
 3. Disable the VM firewall and start Redis.
 
-    ```
+    ```shell
     systemctl stop firewalld
     systemctl start redis
     ```
 
 4. Enable PMU event collection. The number and types of events can be customized based on the chip support. The following uses collection of 10 events as an example.
 
-    ```
+    ```shell
     perf stat -e branches,branch-misses,cache-misses,cache-references,cycles,instructions,alignment-faults,bpf-output,cgroup-switches,cpu-clock
     ```
 
 5. Initiate the stress test from the Redis client.
 
-    ```
+    ```shell
     redis-benchmark -h <VM_IP_address> -n 10000000 -c 1000 -r 10000000  -t get -p 6379 --threads 20
     ```
 
 6. Perform VM live migration on the source physical machine.
 
-    ```
+    ```shell
     virsh migrate --verbose --persistent --live --unsafe <VM_name> qemu+tcp://<IP_address_of_the_target_physical_machine>/system
     ```
 
@@ -500,14 +491,13 @@ yum install -y perf
 
     ![](figures/en-us_image_0000002518411510.png)
 
-
 ### Testing Performance<a name="EN-US_TOPIC_0000002518411508"></a>
 
 **Installing Nginx<a name="section7262191845011"></a>**
 
 Nginx is used only to verify service continuity during live migration. You can use any Nginx version. The following uses 1.24.0 as an example, which is the version provided by the Yum repository. Run the following command on the VM to install it:
 
-```
+```shell
 yum install -y nginx
 ```
 
@@ -515,18 +505,15 @@ yum install -y nginx
 
 Wrk is the Nginx client stress test software. You can use any version. The following uses 4.2.0 as an example to describe how to install the software.
 
-1. Obtain the [wrk-4.2.0](resource/wrk-4.2.0.zip) package from the client physical machine, save the package to the `/home` directory, and run the following commands:
+1. Install the wrk-4.2.0 in the client physical machine.
 
-    ```
-    unzip wrk-4.2.0.zip
-    cd wrk-4.2.0
-    make
-    cp wrk /usr/local/bin/
+    ```shell
+    yum install wrk
     ```
 
 2. Run the following command:
 
-    ```
+    ```shell
     wrk -v
     ```
 
@@ -541,13 +528,13 @@ Wrk is the Nginx client stress test software. You can use any version. The follo
 
 1. Start the source VM.
 
-    ```
+    ```shell
     virsh start <VM_name> --console
     ```
 
 2. Generate a self-signed certificate for testing.
 
-    ```
+    ```shell
     mkdir -p /etc/nginx/ssl
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
       -keyout /etc/nginx/ssl/server.key \
@@ -557,7 +544,7 @@ Wrk is the Nginx client stress test software. You can use any version. The follo
 
 3. Modify the Nginx configuration file `/etc/nginx/nginx.conf`.
 
-    ```
+    ```xml
     server {
         listen 20000 ssl;
         server_name localhost;
@@ -579,7 +566,7 @@ Wrk is the Nginx client stress test software. You can use any version. The follo
 
 4. Disable the VM firewall and start Nginx.
 
-    ```
+    ```shell
     systemctl stop firewalld
     setenforce 0
     systemctl start nginx
@@ -587,14 +574,14 @@ Wrk is the Nginx client stress test software. You can use any version. The follo
 
 5. Initiate the stress test from the Nginx client and start the ping test.
 
-    ```
+    ```shell
     wrk -H "Connection: Close" -c 800 -t 100 -d 120s https://<VM_IP_address>:20000/index.html
     ping -i 0.01 <VM_IP_address>
     ```
 
 6. Perform VM live migration on the source physical machine.
 
-    ```
+    ```shell
     virsh migrate --verbose --persistent --live --unsafe <VM_name> qemu+tcp://<IP_address_of_the_target_physical_machine>/system
     ```
 
@@ -634,13 +621,13 @@ Wrk is the Nginx client stress test software. You can use any version. The follo
 
     1. Edit the file where the error occurs.
 
-        ```
+        ```shell
         vim ../crypto/hash-gcrypt.c
         ```
 
     2. Add a definition for the variable `i` on the line that caused the error, then save the file and exit.
 
-        ```
+        ```c
         for (int i = 0;i < niov; i++)
         ```
 

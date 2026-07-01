@@ -2,10 +2,10 @@
 
 鲲鹏云计算虚拟化代码仓是鲲鹏参与**开源虚拟化软件栈优化**的成果，存放**鲲鹏BoostKit虚拟化加速套件**的相关补丁，该套件覆盖**KVM**、**QEMU**、**Libvirt**、**DPDK**、**SPDK**等核心虚拟化与I/O软件栈。
 
--   虚拟机跨代热迁移是鲲鹏自研特性，对接qemu/kvm使用，通过引入vCPU特性读写框架，实现不同代际服务器上vCPU特性的兼容，适用于鲲鹏920与鲲鹏920新型号之间的虚拟机热迁移场景。
--   L0内存为鲲鹏自研内存加速特性，在非LLC容量敏感场景下，将**部分LLC容量作为高性能L0内存使用**，实现热点数据高性能访问。openvswitch是一个支持多层数据转发的高质量虚拟交换机。主要架构由内核态Datapath、用户态vswitchd和ovsdb组成。从网口读取的数据包，将在Datapath实现快速流表匹配，若匹配失败则上交vswitchd进行处理。L0加速内核态快速流表匹配方案是将处于内核态的Datapath转发路径卸载到L0内存上，从而加速流表查找速度，提升报文的转发效率。
--   DPDK队列选择优化是鲲鹏自研网络加速特性，对接DPDK使用，通过优化DPDK的队列选择算法，降低单个CPU压力，降低网络时延，适用于虚拟机组网为OVS+DPDK的场景。
--   SPDK中断聚合是鲲鹏自研存储性能加速特性，对接SPDK使用，通过中断聚合技术降低后端对前端的中断通知数量，减少虚拟机陷入陷出过程，提升系统整体的吞吐性能，适用于虚拟机存储为SPDK NVME场景。
+- 虚拟机跨代热迁移是鲲鹏自研特性，对接qemu/kvm使用，通过引入vCPU特性读写框架，实现不同代际服务器上vCPU特性的兼容，适用于鲲鹏920与鲲鹏920新型号之间的虚拟机热迁移场景。
+- L0内存为鲲鹏自研内存加速特性，在非LLC容量敏感场景下，将**部分LLC容量作为高性能L0内存使用**，实现热点数据高性能访问。openvswitch是一个支持多层数据转发的高质量虚拟交换机。主要架构由内核态Datapath、用户态vswitchd和ovsdb组成。从网口读取的数据包，将在Datapath实现快速流表匹配，若匹配失败则上交vswitchd进行处理。L0加速内核态快速流表匹配方案是将处于内核态的Datapath转发路径卸载到L0内存上，从而加速流表查找速度，提升报文的转发效率。
+- DPDK队列选择优化是鲲鹏自研网络加速特性，对接DPDK使用，通过优化DPDK的队列选择算法，降低单个CPU压力，降低网络时延，适用于虚拟机组网为OVS+DPDK的场景。
+- SPDK中断聚合是鲲鹏自研存储性能加速特性，对接SPDK使用，通过中断聚合技术降低后端对前端的中断通知数量，减少虚拟机陷入陷出过程，提升系统整体的吞吐性能，适用于虚拟机存储为SPDK NVME场景。
 
 # 版本说明<a name="ZH-CN_TOPIC_0000002441116972"></a>
 
@@ -53,87 +53,83 @@
 
 **虚拟机跨代热迁移特性 部署流程<a name="section1772123143910"></a>**
 
-1.  到openEuler仓库拉取kernel、qemu代码。
-2.  切换到对应分支，使用tools目录中的脚本完成patch应用。
-3.  详细操作步骤请参见《[Kunpeng BoostKit 25.1.RC1 鲲鹏920虚拟机跨代热迁移 特性指南](https://support.huawei.com/enterprise/zh/doc/EDOC1100484197/35a9145e)》。
+1. 到openEuler仓库拉取kernel、qemu代码。
+2. 切换到对应分支，使用tools目录中的脚本完成patch应用。
+3. 详细操作步骤请参见《[Kunpeng BoostKit 25.1.RC1 鲲鹏920虚拟机跨代热迁移 特性指南](https://support.huawei.com/enterprise/zh/doc/EDOC1100484197/35a9145e)》。
 
 **L0加速openvswtich内核态流表匹配特性 部署流程<a name="section1073682415417"></a>**
 
-1.  拉下5.10.0-216源码仓。
+1. 拉下5.10.0-216源码仓。
 
-    ```
+    ```shell
     git clone https://gitee.com/openeuler/kernel.git -b 5.10.0-216.0.0 --depth=1
     ```
 
-2.  将补丁保存为.patch文件。
-3.  合入补丁。
+2. 将补丁保存为.patch文件。
+3. 合入补丁。
 
-    ```
+    ```shell
     git am --reject <补丁名称>
     ```
 
-4.  在“kernel/net/openvswitch“目录编译openvswitch模块。
+4. 在`kernel/net/openvswitch`目录编译openvswitch模块。
 
-    ```
+    ```shell
     make CONFIG_XENO_DRIVERS_NET_DRV_IGB=m -C <源码目录> M=pwd modules
     ```
 
 **DPDK队列训责特性 部署流程<a name="section1934464794214"></a>**
 
-1.  git拉取dpdk 24.11源代码。
-2.  合入DPDK队列选择patch。
-3.  编译安装dpdk 24.11。
+1. git拉取dpdk 24.11源代码。
+2. 合入DPDK队列选择patch。
+3. 编译安装dpdk 24.11。
 
 **SPDK中断聚合特性 部署流程<a name="section1818515266438"></a>**
 
-1.  git拉取SPDK 24.05源代码。
-2.  合入SPDK中断聚合patch。
-3.  编译安装spdk 24.05。
+1. git拉取SPDK 24.05源代码。
+2. 合入SPDK中断聚合patch。
+3. 编译安装spdk 24.05。
 
 # 快速上手<a name="ZH-CN_TOPIC_0000002474516797"></a>
-
-
-
-
 
 ## 跨代热迁移<a name="ZH-CN_TOPIC_0000002474636969"></a>
 
 完成环境部署后，参照部署文档方式启动虚拟机，执行如下命令进行跨代迁移测试，观察迁移过程能否执行完毕并无报错。
 
-```
+```shell
 virsh migrate --verbose --persistent --live --unsafe <虚拟机名称> qemu+tcp://<目的端物理机IP地址>/system
 ```
 
 ## L0内存加速<a name="ZH-CN_TOPIC_0000002441116976"></a>
 
-1.  加载L0模块。
+1. 加载L0模块。
 
-    ```
+    ```shell
     modprobe hisi_l3t
     modprobe hisi_l0
     ```
 
-2.  停止已经开启的openvswitch服务。
+2. 停止已经开启的openvswitch服务。
 
-    ```
+    ```shell
     service openvswitch status
     service openvswitch stop
     ovs-ctl stop
     ```
 
-3.  加载编译出来的openvswitch.ko。
+3. 加载编译出来的openvswitch.ko。
 
-    ```
+    ```shell
     insmod openvswitch.ko
     ```
 
-4.  加载openvswitch.ko后，正常启动openvswitch服务即可使用L0内存加速的内核态快速匹配流表。
+4. 加载openvswitch.ko后，正常启动openvswitch服务即可使用L0内存加速的内核态快速匹配流表。
 
 ## DPDK队列选择优化<a name="ZH-CN_TOPIC_0000002442189534"></a>
 
 完成环境部署后，在虚拟机内执行iperf打流测试，在物理机执行以下命令观测PMD轮训核的压力是否平均分配。
 
-```
+```shell
 ovs-appctl dpif-netdev/pmd-rxq-show -secs 5
 ```
 
