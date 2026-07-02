@@ -6,7 +6,6 @@ This document describes how to adjust the virtualization parameters of Kunpeng s
 
 In KVM-based virtualization environments, while hardware-assisted virtualization significantly reduces overhead, performance loss persists under heavy workloads. Key contributors include VM-exit events, memory virtualization overheads, and I/O virtualization bottlenecks, all potentially creating substantial performance differentials between virtual and physical machines. For mission-critical VMs, these virtualization penalties can manifest as reduced resource utilization, increased latency, constrained throughput, and ultimately failure to meet service performance requirements. To address these challenges, this document provides targeted optimization methodologies for virtualized network and storage subsystems, enabling optimized performance in virtualization environments.
 
-
 ## Environment Requirements<a name="EN-US_TOPIC_0000002549771521"></a>
 
 This section describes the hardware and software requirements of the server to be optimized.
@@ -25,7 +24,6 @@ Kunpeng virtualization loss optimization is applicable to VMs with 4 vCPUs and 8
 |Processor|2 × new Kunpeng 920 processor model|
 |Memory|Populate one DIMM Per Channel (1DPC) to maximize the memory performance. That is, populate all DIMM 0 slots first.|
 
-
 **Software Requirements<a name="section102619448716"></a>**
 
 [**Table 2**](#software-requirements) describes the software requirements.
@@ -41,8 +39,6 @@ Kunpeng virtualization loss optimization is applicable to VMs with 4 vCPUs and 8
 |qperf|0.4.11-1.oe2403sp1|Install it using a Yum repository.|
 |fio|3.34|Install it using a Yum repository.|
 
-
-
 ## Network Loss Optimization<a name="EN-US_TOPIC_0000002518251758"></a>
 
 ### Optimizing VM Placement<a name="EN-US_TOPIC_0000002518411674"></a>
@@ -51,14 +47,13 @@ Running a VM on the same NUMA node as its NIC minimizes cross-node memory access
 
 In the NUMA architecture, local memory access is substantially faster than remote memory access. When vCPUs and memory of a VM are allocated on the same NUMA node as its NIC, data transfers (including network packet processing) occur entirely through local memory, eliminating the additional latency and bandwidth loss of cross-node communication.
 
-```
+```shell
 cat /sys/class/net/<NIC_name>/device/numa_node
 ```
 
 For example, querying the NUMA node for NIC `enp65s0f0np0` reveals that it resides on node 0. Consequently, the vCPUs of the VM should be bound to physical CPU cores within NUMA node 0.
 
 ![](figures/en-us_image_0000002549891521.png)
-
 
 ### Enabling Huge Page Memory<a name="EN-US_TOPIC_0000002518411670" id="enabling-huge-page-memory"></a>
 
@@ -67,7 +62,7 @@ Enabling huge page memory minimizes page table hierarchy levels for memory acces
 1. Modify the kernel cmdline startup parameters. The following method adds the target huge page size and quantity to the startup parameters, enabling huge pages permanently.
     1. Open the `grub2-efi.cfg` file.
 
-        ```
+        ```shell
         vim /etc/grub2-efi.cfg
         ```
 
@@ -80,7 +75,7 @@ Enabling huge page memory minimizes page table hierarchy levels for memory acces
 
 2. Check the huge page configuration.
 
-    ```
+    ```shell
     cat /proc/sys/vm/nr_hugepages
     ```
 
@@ -88,13 +83,13 @@ Enabling huge page memory minimizes page table hierarchy levels for memory acces
 
 3. Configure huge pages in the VM XML file.
 
-    ```
+    ```shell
     virsh edit <VM_name>
     ```
 
     Specify the size in `page size`, that is, the size of the huge page memory enabled for the VM.
 
-    ```
+    ```xml
     <domain type = 'KVM'>
     ...
       <memoryBacking>
@@ -105,7 +100,6 @@ Enabling huge page memory minimizes page table hierarchy levels for memory acces
     ...
     <domain>
     ```
-
 
 ### Enabling GICv4.1<a name="EN-US_TOPIC_0000002549891511" id="enabling-gicv4.1"></a>
 
@@ -132,7 +126,6 @@ GICv4.1 incorporates interrupt direct injection capabilities like vLPI passthrou
 >![](public_sys-resources/icon-note.gif) **NOTE:**
 >When the network bandwidth is tested on a VM with 4 vCPUs and 8 GB memory, network interrupts and application workloads run simultaneously across all four vCPUs due to the limited number of cores. For controlled testing of network bandwidth across four CPU cores on a physical machine, both network interrupts and service operations must be confined to those same four cores.
 
-
 ### Optimizing OVS+DPDK<a name="EN-US_TOPIC_0000002549771523"></a>
 
 VirtIO+OVS+DPDK is a common high-performance virtualization network solution. In this architecture, the frontend VirtIO driver communicates with OVS-DPDK through shared memory (virtqueue); OVS-DPDK processes data packets in user space and uses the Poll Mode Driver (PMD) to send the data packets to the physical NIC. In this way, the solution achieves high-speed forwarding, suitable for cloud native and virtualization scenarios that require high network performance. Two optimization methods are provided for these scenarios.
@@ -143,7 +136,7 @@ OVS automatically collects task load statistics on each PMD polling core and mea
 
 1. Determine whether to enable PMD load balancing.
 
-    ```
+    ```shell
     ovs-appctl dpif-netdev/pmd-rxq-show -secs 5
     ```
 
@@ -152,7 +145,7 @@ OVS automatically collects task load statistics on each PMD polling core and mea
 
 2. Configure OVS PMD load balancing.
 
-    ```
+    ```shell
     ovs-vsctl --no-wait set Open_vSwitch . \
     other_config:pmd-auto-lb="true" \
     other_config:pmd-auto-lb-improvement-threshold="25" \
@@ -166,38 +159,37 @@ OVS automatically collects task load statistics on each PMD polling core and mea
     >`other_config:pmd-auto-lb-load-threshold="70"` indicates that load balancing can be started when the PMD load reaches 70%.
     >`other_config:pmd-auto-lb-rebal-interval="1"` indicates that the automatic load balancing interval is set to 1 minute.
 
-
 #### OVS Queue Selection Optimization<a name="EN-US_TOPIC_0000002518411672"></a>
 
 When a VM is configured with multiple queues, the CPU running the qperf tool may be different from the CPU handling virtio-net input interrupts. In this case, the VM may exit due to inter-processor interrupts (IPIs), increasing latency overhead. In latency-sensitive scenarios, the packet sending queue selection logic on the OVS can be modified to add a sending mode. When the PMD receives a network packet from the VM, it records the 5-tuple information and queue ID. When it sends packets to the VM later, it matches the queue ID based on the 5-tuple information. In this way, VM exits caused by IPIs and packet transmission latency can be reduced.
 
 1. Download the DPDK 24.11 source code.
 
-    ```
+    ```shell
     git clone https://github.com/DPDK/dpdk.git -b v24.11
     ```
 
     Download the OVS 3.5 source code from the upper-level directory of the DPDK 24.11 source code directory.
 
-    ```
+    ```shell
     git clone https://github.com/openvswitch/ovs.git -b v3.5.0
     ```
 
 2. Download the patch for optimizing the OVS queue selection from the upper-level directory of the DPDK 24.11 source code directory.
 
-    ```
+    ```shell
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     ```
 
 3. Apply the patch to the OVS source code. Run the following command in the root directory of the OVS source code:
 
-    ```
+    ```shell
     git am --reject ../boostkit_-virtualization/dpdk/dpdk-24.11/\[Virtualization_Loss_Optimization\]0001-Adding-a-new-transmission-mode-TXQ_REQ.patch
     ```
 
 4. Compile DPDK. Run the following commands in the root directory of the DPDK source code:
 
-    ```
+    ```shell
     meson --prefix=/usr --libdir=/usr/lib64 --bindir=/usr/bin --sbindir=/usr/sbin --includedir=/usr/include/dpdk build 
     ninja -C build
     ninja -C build install
@@ -206,7 +198,7 @@ When a VM is configured with multiple queues, the CPU running the qperf tool may
 
     Compile OVS. Run the following commands in the root directory of the OVS source code:
 
-    ```
+    ```shell
     ./boot.sh
     ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --libdir=/lib64 --enable-ssl --enable-shared --with-dpdk=shared
     make -j`nproc`
@@ -215,18 +207,16 @@ When a VM is configured with multiple queues, the CPU running the qperf tool may
 
 5. Enable OVS queue selection optimization.
 
-    ```
+    ```shell
     ovs-vsctl set Interface tap0 other_config:tx-steering=txfollowrx
     ```
 
     >![](public_sys-resources/icon-note.gif) **NOTE:**
     >To disable this optimization, run the following command:
-    >```
+    >
+    >```shell
     >ovs-vsctl remove Interface tap0 other_config tx-steering
     >```
-
-
-
 
 ## Storage Loss Optimization<a name="EN-US_TOPIC_0000002549771525"></a>
 
@@ -240,7 +230,7 @@ VirtIO+SPDK bypasses the traditional kernel storage stack through SPDK and imple
 
 1. Download the SPDK 24.01 source code.
 
-    ```
+    ```shell
     mkdir SPDK_24.01
     cd SPDK_24.01
     git clone https://github.com/spdk/spdk -b v24.01.x
@@ -248,7 +238,7 @@ VirtIO+SPDK bypasses the traditional kernel storage stack through SPDK and imple
 
 2. Download the SPDK patch.
 
-    ```
+    ```shell
     git clone https://gitee.com/src-openeuler/spdk.git
     cd spdk
     git checkout -b 2403SP2_SPDK origin/openEuler-24.03-LTS-SP2
@@ -257,19 +247,19 @@ VirtIO+SPDK bypasses the traditional kernel storage stack through SPDK and imple
 
     Apply the patch.
 
-    ```
+    ```shell
     git am --reject 0013-vhost-add-vhost-interrupt-coalescing.patch
     ```
 
 3. Install the dependency.
 
-    ```
+    ```shell
     yum install fuse3-devel
     ```
 
 4. Compile and use the new SPDK.
 
-    ```
+    ```shell
     cd ../SPDK_24.01/spdk
     git submodule update --init
     ./configure  --disable-tests --disable-unit-tests  --enable-lto --disable-debug
@@ -281,7 +271,7 @@ VirtIO+SPDK bypasses the traditional kernel storage stack through SPDK and imple
 
 5. Enable SPDK interrupt aggregation.
 
-    ```
+    ```shell
     vhost -S /var/tmp -m [4,6,8,10] -E &
     rpc bdev_aio_create /dev/nvme1n1 aio_0 512
     rpc vhost_create_blk_controller vhost.0 aio_0
@@ -290,7 +280,6 @@ VirtIO+SPDK bypasses the traditional kernel storage stack through SPDK and imple
     >![](public_sys-resources/icon-note.gif) **NOTE:**
     >`-E` is a newly added interrupt aggregation toggle.
     >`[4,6,8,10]` indicates the four polling cores bound to SPDK.
-
 
 ## Acronyms and Abbreviations<a name="EN-US_TOPIC_0000002549771527"></a>
 

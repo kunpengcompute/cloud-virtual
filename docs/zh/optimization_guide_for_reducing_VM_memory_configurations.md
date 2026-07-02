@@ -46,123 +46,151 @@
 ### 配置编译环境
 
 安装编译依赖。
+
 ```bash
 yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build autoconf automake libtool patch libvirt-devel libboundscheck
 ```
 
 ### 获取内核源码与patch
-1. 获取内核源码。
-```bash
-cd /home/
-git clone https://gitcode.com/openeuler/kernel.git
-cd kernel
-git checkout 43da05a574398f23d7d5d1e9126689697c022775
-```
-2. 获取大页内存支持reclaim功能以及ZRAM支持KAE加速功能的补丁文件。
-```bash
-cd /home/
-git clone https://gitcode.com/boostkit/cloud-virtual.git
-```
-3. 应用内核补丁。
-```bash
-cd /home/kernel
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[zram]0001-zram-switch-to-async-acomp-and-mutex.patch
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0001-mm-hugetlb-preparatory-cleanups-for-HugeTLB-swap-sup.patch
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0002-mm-hugetlb-add-HugeTLB-anonymous-page-swap-support.patch
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0003-fs-hugetlbfs-add-file-backed-HugeTLB-page-swap-and-s.patch
-git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0004-mm-hugetlb-add-fault-time-reclaim-inactive-list-and-.patch
-```
 
+1. 获取内核源码。
+
+    ```bash
+    cd /home/
+    git clone https://gitcode.com/openeuler/kernel.git
+    cd kernel
+    git checkout 43da05a574398f23d7d5d1e9126689697c022775
+    ```
+
+2. 获取大页内存支持reclaim功能以及ZRAM支持KAE加速功能的补丁文件。
+
+    ```bash
+    cd /home/
+    git clone https://gitcode.com/boostkit/cloud-virtual.git
+    ```
+
+3. 应用内核补丁。
+
+    ```bash
+    cd /home/kernel
+    git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[zram]0001-zram-switch-to-async-acomp-and-mutex.patch
+    git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0001-mm-hugetlb-preparatory-cleanups-for-HugeTLB-swap-sup.patch
+    git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0002-mm-hugetlb-add-HugeTLB-anonymous-page-swap-support.patch
+    git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0003-fs-hugetlbfs-add-file-backed-HugeTLB-page-swap-and-s.patch
+    git apply /home/cloud-virtual/kernel/kernel-6.6.0/hugepage-reclaim/[hugepage-reclaim]0004-mm-hugetlb-add-fault-time-reclaim-inactive-list-and-.patch
+    ```
 
 ### 编译并安装内核
 
 1. 准备编译config。
-```bash
-cd /home/kernel
-cp /boot/config-6.6.0-132.0.0.111.oe2403sp3.aarch64 .config
-vim .config
-# 删除TRUSTED_KEYS
-CONFIG_SYSTEM_TRUSTED_KEYS=""
-```
+
+    ```bash
+    cd /home/kernel
+    cp /boot/config-6.6.0-132.0.0.111.oe2403sp3.aarch64 .config
+    vim .config
+    # 删除TRUSTED_KEYS
+    CONFIG_SYSTEM_TRUSTED_KEYS=""
+    ```
+
 2. 生成编译配置。
-```bash
-make menuconfig
-```
-弹出配置窗口后直接退出。
+
+    ```bash
+    make menuconfig
+    ```
+
+    弹出配置窗口后直接退出。
 
 3. 编译内核，打包RPM包。
-```bash
-make rpm-pkg -j $(nproc)
-```
+
+    ```bash
+    make rpm-pkg -j $(nproc)
+    ```
+
 4. 安装新内核。（RPM包的路径以实际为准）
-```bash
-rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-6.6.0+-1.aarch64.rpm --force
-rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-devel-6.6.0+-1.aarch64.rpm --force
-```
+
+    ```bash
+    rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-6.6.0+-1.aarch64.rpm --force
+    rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-devel-6.6.0+-1.aarch64.rpm --force
+    ```
+
 5. 编辑 `/etc/grub2-efi.cfg` 文件，添加大页内存参数，大页数量根据实际环境调整。
 
-```text
-"default_hugepagesz=2M hugepagesz=2M hugepages=131072 hugetlb_swap=on"
-```
+    ```text
+    "default_hugepagesz=2M hugepagesz=2M hugepages=131072 hugetlb_swap=on"
+    ```
+
 6. 重启物理机，更换新内核，使配置生效。
 
-```bash
-reboot
-```
+    ```bash
+    reboot
+    ```
 
 ### 编译安装KAE
+
 1. 获取KAE源码。
-```bash
-cd /home/
-git clone https://gitcode.com/boostkit/KAE.git -b kae2
-cd KAE
-```
+
+    ```bash
+    cd /home/
+    git clone https://gitcode.com/boostkit/KAE.git -b kae2
+    cd KAE
+    ```
+
 2. 编译安装KAE。
-```bash
-sh build.sh all
-```
+
+    ```bash
+    sh build.sh all
+    ```
+
 3. 执行以下命令检查KAE安装是否成功。
-```bash
-ll /sys/class/uacce/
-```
-![KAE安装成功示例](figures/zh-cn_image_0000002518691588.png)
+
+    ```bash
+    ll /sys/class/uacce/
+    ```
+
+    ![KAE安装成功示例](figures/zh-cn_image_0000002518691588.png)
 
 ### 获取memlink工具
 
 1. 获取memlink源码。
-```bash
-cd /home/
-git clone https://gitcode.com/openeuler/memlinkd.git
-```
+
+    ```bash
+    cd /home/
+    git clone https://gitcode.com/openeuler/memlinkd.git
+    ```
+
 2. 编译源码。
 
-```bash
-cd memlinkd
-yum-builddep memlinkd.spec
-tar jcvf memlinkd.tar.bz2 --exclude=.git src
-mkdir -p /root/rpmbuild/SOURCES/
-cp memlinkd.tar.bz2 /root/rpmbuild/SOURCES/
-rpmbuild -ba memlinkd.spec
-```
+    ```bash
+    cd memlinkd
+    yum-builddep memlinkd.spec
+    tar jcvf memlinkd.tar.bz2 --exclude=.git src
+    mkdir -p /root/rpmbuild/SOURCES/
+    cp memlinkd.tar.bz2 /root/rpmbuild/SOURCES/
+    rpmbuild -ba memlinkd.spec
+    ```
+
 3. 安装memlink SDK。
 
-```bash
-cd /root/rpmbuild/RPMS/aarch64/;rpm -ivh memlinkd-*
-```
+    ```bash
+    cd /root/rpmbuild/RPMS/aarch64/;rpm -ivh memlinkd-*
+    ```
 
 ### 获取大页内存管理工具
+
 该工具仅作为功能演示工具，提供大页内存冷热分级与主动swap回收功能的使用方法以及基本的内存管理策略，不建议直接在生产环境中使用，用户可以参考该工具，结合实际使用场景进行定制化配置。
 
 1. 获取reclaim源码。
-```bash
-git clone https://gitcode.com/boostkit/cloud-virtual.git
-```
+
+    ```bash
+    git clone https://gitcode.com/boostkit/cloud-virtual.git
+    ```
+
 2. 编译源码。
 
-```bash
-cd cloud-virtual/tools/
-gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk -lboundscheck
-```
+    ```bash
+    cd cloud-virtual/tools/
+    gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk -lboundscheck
+    ```
 
 ## 安装软件
 
@@ -170,121 +198,130 @@ gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma 
 
 安装libvirt/qemu相关软件包。
 
-```bash
-yum install -y libvirt qemu edk2-aarch64
-```
+    ```bash
+    yum install -y libvirt qemu edk2-aarch64
+    ```
 
 ### 虚拟机软件安装
 
 安装redis、nginx、wrk等相关软件包。
 
-```bash
-yum install -y redis nginx wrk
-```
+    ```bash
+    yum install -y redis nginx wrk
+    ```
 
 ## 使用特性
 
 ### 配置大页数量
 
 测试过程中，可以根据需要动态调整每个NUMA节点的大页数量（例如，调整node0的大页数量为10000）。
+
 ```bash
 echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 ```
+
 ### 配置虚拟机
 
 1. 编辑虚拟机XML配置文件，添加大页内存支持，开启大页pod选项，启用大页动态分配，并对虚拟机进行绑核/绑内存（核心与内存绑定需要根据实际情况配置）。
 
-|标签名|说明|
-|--|--|
-|hugepages|添加大页内存支持。|
-|hugepage-ondemand|开启大页pod选项，支持大页动态分配，无此配置默认关闭。|
-|cputune|对虚拟机进行绑核。|
-|numatune|对虚拟机进行绑内存。|
+    |标签名|说明|
+    |--|--|
+    |hugepages|添加大页内存支持。|
+    |hugepage-ondemand|开启大页pod选项，支持大页动态分配，无此配置默认关闭。|
+    |cputune|对虚拟机进行绑核。|
+    |numatune|对虚拟机进行绑内存。|
 
-```xml
-<memoryBacking>
-  <hugepages>
-    <page size='2048' unit='KiB'/>
-  </hugepages>
-  <allocation mode='hugepage-ondemand'/>
-</memoryBacking>
-<cputune>
-  <vcpupin vcpu='0' cpuset='10'/>
-  <vcpupin vcpu='1' cpuset='11'/>
-  <emulatorpin cpuset='10-11'/>
-</cputune>
-<numatune>
-  <memnode cellid='0' mode='strict' nodeset='0'/>
-</numatune>
-<cpu mode="host-passthrough" check="none">
-  <numa>
-    <cell id='0' cpus='0-1' memory='8388608' unit='KiB' memAccess='shared'/>
-  </numa>
-</cpu>
-```
+    ```xml
+    <memoryBacking>
+      <hugepages>
+        <page size='2048' unit='KiB'/>
+      </hugepages>
+      <allocation mode='hugepage-ondemand'/>
+    </memoryBacking>
+    <cputune>
+      <vcpupin vcpu='0' cpuset='10'/>
+      <vcpupin vcpu='1' cpuset='11'/>
+      <emulatorpin cpuset='10-11'/>
+    </cputune>
+    <numatune>
+      <memnode cellid='0' mode='strict' nodeset='0'/>
+    </numatune>
+    <cpu mode="host-passthrough" check="none">
+      <numa>
+        <cell id='0' cpus='0-1' memory='8388608' unit='KiB' memAccess='shared'/>
+      </numa>
+    </cpu>
+    ```
+
 2. 编辑虚拟机XML配置文件，配置虚拟机内存回收策略标签。所有虚拟机都需要配置此标签，通过标签内容区分是否允许回收。
 注意：回收标签为自定义元数据标签，文档给出的仅为示例，用户可根据实际情况自定义标签名称，并结合大页内存回收工具使用。
 
 - **允许内存回收**（推荐配置）：
-```xml
-<metadata>
-  <reclaim xmlns="http://reclaim.io"/>
-</metadata>
-```
+
+  ```xml
+  <metadata>
+    <reclaim xmlns="http://reclaim.io"/>
+  </metadata>
+  ```
 
 - **禁止内存回收**：
-```xml
-<metadata>
-  <no_reclaim xmlns="http://reclaim.io"/>
-</metadata>
-```
+
+  ```xml
+  <metadata>
+    <no_reclaim xmlns="http://reclaim.io"/>
+  </metadata>
+  ```
 
 ### 启动memlink工具
 
 1. 修改memlink配置，修改部分配置项如下。
-```bash
-vim /etc/memlinkd.conf
-```
-```text
-page_score_enable=1
-page_score_poll_cycle_sec=5
-```
+
+    ```bash
+    vim /etc/memlinkd.conf
+    ```
+
+    ```text
+    page_score_enable=1
+    page_score_poll_cycle_sec=5
+    ```
 
 2. 启动memlink工具。
 
-```bash
-modprobe etmem_scan
-systemctl start memlinkd
-```
+    ```bash
+    modprobe etmem_scan
+    systemctl start memlinkd
+    ```
+
 ### 启用KAE加速
 
 1. 加载KAE内核模块。
 
-```bash
-rmmod hisi_zip
-rmmod hisi_sec2
-rmmod hisi_hpre
-rmmod hisi_qm
-rmmod uacce
-modprobe hisi_zip uacce_mode=2 perf_mode=1 pf_q_num=256
-```
+    ```bash
+    rmmod hisi_zip
+    rmmod hisi_sec2
+    rmmod hisi_hpre
+    rmmod hisi_qm
+    rmmod uacce
+    modprobe hisi_zip uacce_mode=2 perf_mode=1 pf_q_num=256
+    ```
 
 2. 验证KAE加速是否生效。
 执行以下命令，观察KAE队列是否存在，队列数是否与配置的队列数一致。
 
-```bash
-watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
-```
-![KAE加速生效示例](figures/zh-cn_image_0000002518691590.png)
+    ```bash
+    watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
+    ```
 
-
+    ![KAE加速生效示例](figures/zh-cn_image_0000002518691590.png)
 
 ### 配置ZRAM与swap接口
 
 ```bash
 modprobe etmem_swap
 ```
+
 注意：ZRAM块设备大小根据实际大页内存大小配置，建议配置为整机大页内存总量的40%，ZRAM配置流程请严格遵循本文档，不支持配置writeback设备与二次压缩算法。
+
 ```bash
 modprobe zram
 echo deflate > /sys/block/zram0/comp_algorithm
@@ -292,10 +329,13 @@ echo 32G > /sys/block/zram0/disksize
 mkswap /dev/zram0
 swapon -p 100 /dev/zram0
 ```
+
 配置完成后检查KAE队列数量是否发生变化，若队列数量对比配置前减少，说明KAE加速已生效。
+
 ```bash
 watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
 ```
+
 ### 启动大页内存管理工具
 
 ```bash
@@ -305,96 +345,128 @@ watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
 ## 启动虚拟机开始测试
 
 ### 单虚拟机超分测试
+
 该测试仅用于可靠性测试，以8U32G虚拟机为例，配置大页内存为12288页（24GB），虚拟机内存为32GB（注：如果虚拟机使用dpdk/spdk等大页内存应用，大页数量配置时应预留出应用所需的大页数量，目前dpdk/spdk应用的内存申请不受控，可能会出现跨NUMA直接申请大页内存的情况）。
+
 1. 配置大页数量为12288页（24GB）。
-```bash
-echo 12288 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
-```
+
+    ```bash
+    echo 12288 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+    ```
+
 2. 启动虚拟机。
 
-```bash
-virsh start vm_name
-```
+    ```bash
+    virsh start vm_name
+    ```
 
 3. 在虚拟机内部启动redis或nginx服务。
-```bash
-systemctl start redis
-```
-或
-```bash
-systemctl start nginx
-```
+
+    ```bash
+    systemctl start redis
+    ```
+
+    或
+
+    ```bash
+    systemctl start nginx
+    ```
 
 4. 在物理机执行以下命令观测剩余大页数量。
-```bash
-watch -n 1 "cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/free_hugepages"
-```
+
+    ```bash
+    watch -n 1 "cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/free_hugepages"
+    ```
 
 5. 在客户端启动压测工具，对redis或nginx服务进行压测。
-```bash
-redis-benchmark -h \<虚拟机IP地址\> -p 6379 -t set -c 1000 -r 10000000 -n 10000000 -d 1024
-```
-或
-```bash
-wrk -H "Connection: Close" -t 10 -c 8000 -d 60s http://\<虚拟机IP地址\>:\<端口号\>/index.html
-```
+
+    ```bash
+    redis-benchmark -h \<虚拟机IP地址\> -p 6379 -t set -c 1000 -r 10000000 -n 10000000 -d 1024
+    ```
+
+    或
+
+    ```bash
+    wrk -H "Connection: Close" -t 10 -c 8000 -d 60s http://\<虚拟机IP地址\>:\<端口号\>/index.html
+    ```
 
 6. 记录压测结果，对比内存不超分情况，在剩余大页数量大于大页总量10%前，压测性能下降小于15%。
 
 7. 观察剩余大页内存数量小于大页总量20%时，是否触发大页内存主动swap回收，以下两种方式都可以观察到，同时注意reclaim工具的日志。
-```bash
-watch -n 1 "swapon --show"
-```
-![image.png](https://raw.gitcode.com/user-images/assets/9882662/85fa1eec-1006-4881-a39b-de41e2a60bdc/image.png 'image.png')
-```bash
-watch -n 1 "cat /proc/meminfo | grep Huge"
-```
-![image.png](https://raw.gitcode.com/user-images/assets/9882662/a73c2a2c-7844-4fe0-a0c3-87e71fd0a768/image.png 'image.png')
 
+    ```bash
+    watch -n 1 "swapon --show"
+    ```
+
+    ![image.png](https://raw.gitcode.com/user-images/assets/9882662/85fa1eec-1006-4881-a39b-de41e2a60bdc/image.png 'image.png')
+
+    ```bash
+    watch -n 1 "cat /proc/meminfo | grep Huge"
+    ```
+
+    ![image.png](https://raw.gitcode.com/user-images/assets/9882662/a73c2a2c-7844-4fe0-a0c3-87e71fd0a768/image.png 'image.png')
 
 8. 在虚拟机内观测到虚拟机内存占用超过24G后，查看物理机剩余大页数量出现下降至0的情况时，观测虚拟机是否能正常使用；继续压测，虚拟机内部内存占用是否持续上升；此状态下不再保证虚拟机的性能。
 
 ### 多虚拟机超分测试
+
 以单NUMA 60G大页为例，配置单个NUMA节点的大页数量为30720页（60GB），启动三台虚拟机，内存规格分别为16G、32G、32G。
+
 1. 配置大页数量为30720页（60GB）。
-```bash
-echo 30720 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
-```
+
+    ```bash
+    echo 30720 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+    ```
+
 2. 启动虚拟机。
-```bash
-virsh start vm_name1
-virsh start vm_name2
-virsh start vm_name3
-```
+
+    ```bash
+    virsh start vm_name1
+    virsh start vm_name2
+    virsh start vm_name3
+    ```
+
 3. 在每个虚拟机内部启动redis或nginx服务。
-```bash
-systemctl start redis
-```
-或
-```bash
-systemctl start nginx
-```
+
+    ```bash
+    systemctl start redis
+    ```
+
+    或
+
+    ```bash
+    systemctl start nginx
+    ```
+
 4. 在物理机执行以下命令观测剩余大页数量。
-```bash
-watch -n 1 "cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/free_hugepages"
-```
+
+    ```bash
+    watch -n 1 "cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/free_hugepages"
+    ```
+
 5. 在客户端启动压测工具，对redis或nginx服务进行压测。
-```bash
-redis-benchmark -h \<虚拟机IP地址\> -p 6379 -t set -c 1000 -r 10000000 -n 10000000 -d 1024
-```
-或
-```bash
-wrk -H "Connection: Close" -t 10 -c 8000 -d 60s http://\<虚拟机IP地址\>:\<端口号\>/index.html
-```
+
+    ```bash
+    redis-benchmark -h \<虚拟机IP地址\> -p 6379 -t set -c 1000 -r 10000000 -n 10000000 -d 1024
+    ```
+
+    或
+
+    ```bash
+    wrk -H "Connection: Close" -t 10 -c 8000 -d 60s http://\<虚拟机IP地址\>:\<端口号\>/index.html
+    ```
+
 6. 记录压测结果，对比内存不超分情况，在剩余大页数量大于大页总量10%前，压测性能下降小于15%。
 
 7. 观察剩余大页内存数量小于大页总量20%时，是否触发大页内存主动swap回收，以下两种方式都可以观察到，同时注意reclaim工具的日志。
-```bash
-watch -n 1 "swapon --show"
-```
-```bash
-watch -n 1 "cat /proc/meminfo | grep Huge"
-```
+
+    ```bash
+    watch -n 1 "swapon --show"
+    ```
+
+    ```bash
+    watch -n 1 "cat /proc/meminfo | grep Huge"
+    ```
 
 8. 在虚拟机内观测到虚拟机内存占用超过64G后，查看物理机剩余大页数量出现下降至0的情况时，观测虚拟机是否能正常使用；继续压测，虚拟机内部内存占用是否持续上升；此状态下不再保证虚拟机的性能。
 

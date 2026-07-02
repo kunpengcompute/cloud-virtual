@@ -6,7 +6,6 @@
 
 在基于KVM的虚拟化场景中，尽管KVM通过利用硬件虚拟化技术显著降低了虚拟化开销，但在高负载场景下，虚拟机仍可能面临由VM-Exit事件、内存虚拟化开销以及I/O虚拟化瓶颈等所引发的性能损耗。这些损耗可能导致虚拟机与物理机之间的性能差距依然显著。对于承载关键业务的虚拟机，过高的虚拟化损耗可能导致资源利用率下降、延迟增加、吞吐量受限，甚至无法满足业务性能要求。因此，本文将提供针对虚拟化网络和存储应用的调优指南，以帮助优化虚拟化环境中的性能表现。
 
-
 ## 环境要求<a name="ZH-CN_TOPIC_0000002549771521"></a>
 
 描述被调优的服务器的硬件要求和软件要求。
@@ -25,7 +24,6 @@
 |处理器|2*鲲鹏920新型号处理器|
 |内存|内存按1DPC方式配置将获得最佳性能，即将DIMM0插满。|
 
-
 **软件要求<a name="section102619448716"></a>**
 
 软件要求如[**表 2** 软件要求](#软件要求)所示。
@@ -41,8 +39,6 @@
 |qperf|0.4.11-1.oe2403sp1|通过配置Yum源安装|
 |FIO|3.34|通过配置Yum源安装|
 
-
-
 ## 网络损耗调优<a name="ZH-CN_TOPIC_0000002518251758"></a>
 
 ### 设置虚拟机运行位置<a name="ZH-CN_TOPIC_0000002518411674"></a>
@@ -51,14 +47,13 @@
 
 NUMA架构下，每个CPU节点（NUMA Node）的本地内存访问速度远快于远程节点。若虚拟机的vCPU和内存分配在网卡所属的NUMA节点，虚拟机与网卡之间的数据传输（如网络包处理）可直接通过本地内存完成，避免了跨节点访问的额外延迟和带宽损耗。
 
-```
+```shell
 cat /sys/class/net/网卡名/device/numa_node
 ```
 
 此处为示例，执行上述命令查询网卡enp65s0f0np0。可见其所在NUMA节点为0。因此，虚拟机的vCPU应该绑定在NUMA 0节点上的物理CPU核心。
 
 ![](figures/zh-cn_image_0000002549891521.png)
-
 
 ### 开启内存大页<a name="ZH-CN_TOPIC_0000002518411670" id="开启内存大页"></a>
 
@@ -67,7 +62,7 @@ cat /sys/class/net/网卡名/device/numa_node
 1. 修改cmdline启动参数。以下开启内存大页的方式为永久开启，是在启动参数中添加目标大页大小与数量。
     1. 打开grub2-efi.cfg文件。
 
-        ```
+        ```shell
         vim /etc/grub2-efi.cfg
         ```
 
@@ -80,7 +75,7 @@ cat /sys/class/net/网卡名/device/numa_node
 
 2. 确认内存大页配置情况。
 
-    ```
+    ```shell
     cat /proc/sys/vm/nr_hugepages
     ```
 
@@ -88,13 +83,13 @@ cat /sys/class/net/网卡名/device/numa_node
 
 3. 虚拟机xml中配置内存大页。
 
-    ```
+    ```shell
     virsh edit 虚拟机名称
     ```
 
     如下所示，在page size中指定大小，即是虚拟机启用的内存大页大小。
 
-    ```
+    ```xml
     <domain type = 'KVM'>
     ...
       <memoryBacking>
@@ -105,7 +100,6 @@ cat /sys/class/net/网卡名/device/numa_node
     ...
     <domain>
     ```
-
 
 ### 开启GICv4.1<a name="ZH-CN_TOPIC_0000002549891511" id="开启GICv4.1"></a>
 
@@ -132,7 +126,6 @@ GICv4.1中引入诸如直通设备vLPI中断透传、vSGI中断直通等中断�
 >![](public_sys-resources/icon-note.gif) **说明：** 
 >在使用4U8G规格虚拟机测试网络带宽时，由于虚拟机vCPU核数较少，网络中断与业务会同时运行在四个vCPU中。为了控制变量，需要测试物理机四个CPU核心的网络带宽时，同样将网络中断与业务运行在四个CPU核心中。
 
-
 ### OVS+DPDK优化<a name="ZH-CN_TOPIC_0000002549771523"></a>
 
 Virtio+OVS+DPDK组网模式是一种常用的高性能虚拟化网络解决方案。在该架构中，前端Virtio驱动通过共享内存（Virtqueue）与OVS-DPDK通信，而OVS-DPDK是在用户态处理数据包并通过Poll Mode Driver \(PMD\) 发送到物理网卡，实现高速转发，适用于网络性能要求较高的云原生和虚拟化场景。在该场景下可根据实际需要，使能以下两种优化手段。
@@ -143,7 +136,7 @@ PMD负载均衡通过OVS侧自动统计每个PMD轮询核上的任务负载，�
 
 1. 判断是否需要使能PMD负载均衡优化。
 
-    ```
+    ```shell
     ovs-appctl dpif-netdev/pmd-rxq-show -secs 5
     ```
 
@@ -152,7 +145,7 @@ PMD负载均衡通过OVS侧自动统计每个PMD轮询核上的任务负载，�
 
 2. 执行如下命令配置OVS PMD负载均衡。
 
-    ```
+    ```shell
     ovs-vsctl --no-wait set Open_vSwitch . \
     other_config:pmd-auto-lb="true" \
     other_config:pmd-auto-lb-improvement-threshold="25" \
@@ -166,38 +159,37 @@ PMD负载均衡通过OVS侧自动统计每个PMD轮询核上的任务负载，�
     >other\_config:pmd-auto-lb-load-threshold="70"：表示PMD负载达到70%可以启动均衡。
     >other\_config:pmd-auto-lb-rebal-interval="1"：设置自动均衡周期为1min。
 
-
 #### OVS队列选择策略优化<a name="ZH-CN_TOPIC_0000002518411672"></a>
 
 当虚拟机是多队列的场景下，虚拟机qperf时延工具运行所在的CPU可能和virtio-net input中断的CPU不在同一个上面，此时虚拟机会涉及IPI中断陷出，从而增加了时延开销。所以对于时延敏感型场景，可以更改OVS侧发包队列的选择逻辑，新增发送模式，当PMD接收到来自虚拟机的网络包时，记录其五元组信息以及队列ID。下次往虚拟机发送包时，根据对应五元组信息匹配到对应的队列ID，这样就可以尽可能的减少虚拟机IPI陷出的情况，减少网络收发包的时延。
 
 1. 下载DPDK 24.11源码。
 
-    ```
+    ```shell
     git clone https://github.com/DPDK/dpdk.git -b v24.11
     ```
 
     在DPDK 24.11源码目录的上级目录下载OVS 3.5源码。
 
-    ```
+    ```shell
     git clone https://github.com/openvswitch/ovs.git -b v3.5.0
     ```
 
 2. 在DPDK 24.11源码目录的上级目录下载OVS队列选择优化补丁。
 
-    ```
+    ```shell
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     ```
 
 3. 将补丁打入OVS源码。以下命令在OVS源码的根目录下执行。
 
-    ```
+    ```shell
     git am --reject ../boostkit_-virtualization/dpdk/dpdk-24.11/\[Virtualization_Loss_Optimization\]0001-Adding-a-new-transmission-mode-TXQ_REQ.patch
     ```
 
 4. 编译DPDK。以下命令在DPDK源码的根目录下执行。
 
-    ```
+    ```shell
     meson --prefix=/usr --libdir=/usr/lib64 --bindir=/usr/bin --sbindir=/usr/sbin --includedir=/usr/include/dpdk build 
     ninja -C build
     ninja -C build install
@@ -206,7 +198,7 @@ PMD负载均衡通过OVS侧自动统计每个PMD轮询核上的任务负载，�
 
     编译OVS。以下命令在OVS源码的根目录下执行。
 
-    ```
+    ```shell
     ./boot.sh
     ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --libdir=/lib64 --enable-ssl --enable-shared --with-dpdk=shared
     make -j`nproc`
@@ -215,18 +207,16 @@ PMD负载均衡通过OVS侧自动统计每个PMD轮询核上的任务负载，�
 
 5. 开启OVS队列选择优化。
 
-    ```
+    ```shell
     ovs-vsctl set Interface tap0 other_config:tx-steering=txfollowrx
     ```
 
     >![](public_sys-resources/icon-note.gif) **说明：** 
     >如需关闭使用命令：
-    >```
+    >
+    >```shell
     >ovs-vsctl remove Interface tap0 other_config tx-steering
     >```
-
-
-
 
 ## 存储损耗调优<a name="ZH-CN_TOPIC_0000002549771525"></a>
 
@@ -240,7 +230,7 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
 
 1. 下载SPDK 24.01源码。
 
-    ```
+    ```shell
     mkdir SPDK_24.01
     cd SPDK_24.01
     git clone https://github.com/spdk/spdk -b v24.01.x
@@ -248,7 +238,7 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
 
 2. 下载SPDK补丁。
 
-    ```
+    ```shell
     git clone https://gitee.com/src-openeuler/spdk.git
     cd spdk
     git checkout -b 2403SP2_SPDK origin/openEuler-24.03-LTS-SP2
@@ -257,19 +247,19 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
 
     合入补丁。
 
-    ```
+    ```shell
     git am --reject 0013-vhost-add-vhost-interrupt-coalescing.patch
     ```
 
 3. 安装依赖。
 
-    ```
+    ```shell
     yum install fuse3-devel
     ```
 
 4. 编译使用新的SPDK。
 
-    ```
+    ```shell
     cd ../SPDK_24.01/spdk
     git submodule update --init
     ./configure  --disable-tests --disable-unit-tests  --enable-lto --disable-debug
@@ -281,7 +271,7 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
 
 5. 开启SPDK中断聚合。
 
-    ```
+    ```shell
     vhost -S /var/tmp -m [4,6,8,10] -E &
     rpc bdev_aio_create /dev/nvme1n1 aio_0 512
     rpc vhost_create_blk_controller vhost.0 aio_0
@@ -290,7 +280,6 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
     >![](public_sys-resources/icon-note.gif) **说明：** 
     >其中“-E”参数为新增的中断聚合使能开关。
     >\[4,6,8,10\]为SPDK绑定的4个轮询核。
-
 
 ## 缩略语<a name="ZH-CN_TOPIC_0000002549771527"></a>
 
@@ -304,6 +293,3 @@ Virtio+SPDK通过SPDK绕过传统内核存储栈，通过用户态驱动 + 共�
 |GIC|Generic Interrupt Controller|通用中断控制器|
 |LPI|Local Peripheral Interrupt|本地外设中断|
 |SGI|Software Generated Interrupt|软件生成的中断|
-
-
-

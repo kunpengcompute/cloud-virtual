@@ -50,7 +50,6 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 
 ## 环境要求
 
-
 启用本特性之前，请确认软硬件环境满足要求。
 
 **硬件要求**
@@ -70,7 +69,6 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 | qemu | `8.2.0（yum源）`  |
 | bios版本 | `10.79`  |
 
-
 ## 获取并合入VF ITS补丁
 
 ### 获取补丁
@@ -85,7 +83,6 @@ https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0/VF_IT
 
 1. `0001-PCI-ACPI-Support-ITS-selection-for-PCI-VF-devices.patch`
 2. `0002-PCI-Fix-kabi-broken-for-SR-IOV-exported-symbols.patch`
-
 
 ### 获取目标内核源码
 
@@ -103,8 +100,8 @@ git branch --show-current
 OLK-6.6
 ```
 
-
 ### 合入补丁
+
 1. 合入补丁前，建议确认源码目录干净：
 
    ```bash
@@ -127,7 +124,6 @@ OLK-6.6
    <newest> PCI: Fix kabi broken for SR-IOV exported symbols
    <older>  PCI/ACPI: Support ITS selection for PCI VF devices
    ```
-
 
 ## 编译并安装内核
 
@@ -352,28 +348,28 @@ socket 0 ITS D: index7: 0x0488000000
 
 1. 检查PF节点是否存在。
 
-```bash
-ls /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
-```
+   ```bash
+   ls /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
+   ```
 
 2. 检查当前配置是否已写入。
 
-```bash
-cat /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
-cat /sys/bus/pci/devices/${PF_BDF}/sriov_numvfs
-```
+   ```bash
+   cat /sys/bus/pci/devices/${PF_BDF}/sriov_vf_its_indices
+   cat /sys/bus/pci/devices/${PF_BDF}/sriov_numvfs
+   ```
 
 3. 检查VF是否已生成。
 
-```bash
-ls -l /sys/bus/pci/devices/${PF_BDF}/virtfn*
-```
+   ```bash
+   ls -l /sys/bus/pci/devices/${PF_BDF}/virtfn*
+   ```
 
 4. 检查运行日志。
 
-```bash
-dmesg | grep -E 'VF uses ITS raw index|failed to resolve VF ITS raw index|VF ITS selection'
-```
+   ```bash
+   dmesg | grep -E 'VF uses ITS raw index|failed to resolve VF ITS raw index|VF ITS selection'
+   ```
 
 ### `sriov_numvfs != 0`时写配置失败的解决方法
 
@@ -477,7 +473,6 @@ PF已显式配置`sriov_vf_its_indices`时，VF运行时必须解析到合法的
 **处理方法**
 
 检查配置值、当前平台raw index对照表和`dmesg`日志，确认每个candidate raw index都能解析到合法的PCI MSI domain。
-
 
 ## 缩略语
 
