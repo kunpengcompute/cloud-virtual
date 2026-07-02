@@ -133,7 +133,7 @@ After the environment is deployed, perform iPerf traffic sending test on the VM,
 ovs-appctl dpif-netdev/pmd-rxq-show -secs 5
 ```
 
-![](figures/en-us_image_0000002475320297.png)
+![](figures/zh-cn_image_0000002475320297.png)
 
 ## SPDK Interrupt Aggregation<a name="EN-US_TOPIC_0000002475309653"></a>
 
