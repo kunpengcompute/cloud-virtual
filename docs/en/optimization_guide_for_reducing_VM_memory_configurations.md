@@ -59,7 +59,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     cd /home/
     git clone https://gitcode.com/openeuler/kernel.git
     cd kernel
-    git checkout 43da05a574398f23d7d5d1e9126689697c022775
+    git checkout ce07ff4681bc4d83315681ae78e0b7ef1a5bd315
     ```
 
 2. Obtain the patch files that allow the huge-page memory to support the reclaim function and ZRAM to support KAE.
