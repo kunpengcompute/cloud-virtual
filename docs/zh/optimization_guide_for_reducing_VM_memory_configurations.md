@@ -59,7 +59,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     cd /home/
     git clone https://gitcode.com/openeuler/kernel.git
     cd kernel
-    git checkout 43da05a574398f23d7d5d1e9126689697c022775
+    git checkout ce07ff4681bc4d83315681ae78e0b7ef1a5bd315
     ```
 
 2. 获取大页内存支持reclaim功能以及ZRAM支持KAE加速功能的补丁文件。
