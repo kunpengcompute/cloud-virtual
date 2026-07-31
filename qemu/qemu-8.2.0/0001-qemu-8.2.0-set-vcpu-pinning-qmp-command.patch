@@ -1,0 +1,905 @@
+From defb08b17cd93625b4eb4635a3a6e0a3a8b89659 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt@live.cn>
+Date: Thu, 30 Jul 2026 10:03:08 +0800
+Subject: [PATCH 1/2] [qemu-8.2.0] set-vcpu-pinning qmp command
+
+---
+ hw/arm/meson.build         |   4 +-
+ hw/arm/virt-vcpu-pinning.c | 654 +++++++++++++++++++++++++++++++++++++
+ hw/arm/virt.c              |  27 +-
+ include/hw/arm/virt.h      |  67 +++-
+ qapi/machine-target.json   |  51 +++
+ 5 files changed, 799 insertions(+), 4 deletions(-)
+ create mode 100644 hw/arm/virt-vcpu-pinning.c
+
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 68245d3ad1..12cf890339 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -1,6 +1,8 @@
+ arm_ss = ss.source_set()
+ arm_ss.add(files('boot.c'), fdt)
+ arm_ss.add(when: 'CONFIG_ARM_VIRT', if_true: files('virt.c'))
++arm_ss.add(when: ['CONFIG_ARM_VIRT', 'CONFIG_KVM'],
++           if_true: files('virt-vcpu-pinning.c'))
+ arm_ss.add(when: 'CONFIG_ACPI', if_true: files('virt-acpi-build.c'))
+ arm_ss.add(when: 'CONFIG_DIGIC', if_true: files('digic_boards.c'))
+ arm_ss.add(when: 'CONFIG_EMCRAFT_SF2', if_true: files('msf2-som.c'))
+@@ -71,4 +73,4 @@ system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4_boards.c'))
+ system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_peripherals.c'))
+ system_ss.add(when: 'CONFIG_TOSA', if_true: files('tosa.c'))
+ 
+-hw_arch += {'arm': arm_ss}
++hw_arch += {'arm': arm_ss}
+\ No newline at end of file
+diff --git a/hw/arm/virt-vcpu-pinning.c b/hw/arm/virt-vcpu-pinning.c
+new file mode 100644
+index 0000000000..1133fb7cab
+--- /dev/null
++++ b/hw/arm/virt-vcpu-pinning.c
+@@ -0,0 +1,654 @@
++/*
++ * Flexible CCL (auto-topology) support for ARM virt machine
++ *
++ * This implements the QMP command `set-vcpu-pinning` which receives
++ * vcpu-to-pcpu pinning information from libvirt. When auto-topology
++ * is enabled, QEMU queries the host sysfs topology for each pcpu
++ * and derives virtual CCL/socket topology, which is then used to
++ * build the PPTT ACPI table.
++ *
++ * Copyright (c) 2024
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2 or later.
++ * See the COPYING file in the top-level directory.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-machine-target.h"
++#include "hw/arm/virt.h"
++#include "hw/boards.h"
++#include "sysemu/kvm.h"
++#include "sysemu/runstate.h"
++#include "qemu/error-report.h"
++
++/* Cache type values: bit0=Instruction, bit1=Data, bit2=Unified (matches CLIDR CTYPE encoding) */
++#define VIRT_CACHE_TYPE_INSTRUCTION 0
++#define VIRT_CACHE_TYPE_DATA        1
++#define VIRT_CACHE_TYPE_UNIFIED     2
++
++/* Cache share scope values */
++#define VIRT_CACHE_SHARE_CORE   0
++#define VIRT_CACHE_SHARE_CCL    1
++#define VIRT_CACHE_SHARE_SOCKET 2
++
++/*
++ * Read a topology attribute from sysfs for a given pcpu.
++ * Returns -1 on error.
++ */
++int virt_read_pcpu_topology_attr(int pcpu_id, const char *attr)
++{
++    g_autofree char *path = NULL;
++    g_autofree char *content = NULL;
++    GError *gerr = NULL;
++    long val;
++
++    path = g_strdup_printf("/sys/devices/system/cpu/cpu%d/topology/%s",
++                           pcpu_id, attr);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        error_report("Failed to read %s: %s", path, gerr->message);
++        g_error_free(gerr);
++        return -1;
++    }
++
++    val = strtol(content, NULL, 10);
++    return (int)val;
++}
++
++/*
++ * Read a sysfs attribute for a given pcpu as a string.
++ * attr is relative to /sys/devices/system/cpu/cpu<N>/
++ * Returns newly allocated string or NULL on error.
++ */
++char *virt_read_pcpu_attr_str(int pcpu_id, const char *attr)
++{
++    g_autofree char *path = NULL;
++    char *content = NULL;
++    GError *gerr = NULL;
++
++    path = g_strdup_printf("/sys/devices/system/cpu/cpu%d/%s",
++                           pcpu_id, attr);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        error_report("Failed to read %s: %s", path, gerr->message);
++        g_error_free(gerr);
++        return NULL;
++    }
++
++    return content;
++}
++
++/*
++ * Find the NUMA node ID that a pcpu belongs to by scanning
++ * /sys/devices/system/cpu/cpu<id>/node<N> directories.
++ * Returns node ID (>= 0) on success, or 0 on failure.
++ */
++static int virt_find_pcpu_node_id(int pcpu_id)
++{
++    int node_id = 0;
++    g_autofree char *cpu_path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d", pcpu_id);
++    DIR *dir = opendir(cpu_path);
++    if (dir) {
++        struct dirent *ent;
++        while ((ent = readdir(dir)) != NULL) {
++            int n;
++            if (sscanf(ent->d_name, "node%d", &n) == 1) {
++                node_id = n;
++                break;
++            }
++        }
++        closedir(dir);
++    }
++    return node_id;
++}
++
++/*
++ * Check if a pcpu is online on the host.
++ */
++static bool pcpu_is_online(int pcpu_id)
++{
++    g_autofree char *path = NULL;
++    g_autofree char *content = NULL;
++    GError *gerr = NULL;
++
++    path = g_strdup_printf("/sys/devices/system/cpu/cpu%d/online",
++                           pcpu_id);
++    /* cpu0 always has no online file and is always online */
++    if (pcpu_id == 0) {
++        return true;
++    }
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        /* If the online file doesn't exist, the cpu is considered online */
++        g_error_free(gerr);
++        return true;
++    }
++    return strtol(content, NULL, 10) == 1;
++}
++
++/*
++ * Find the LLC (Last Level Cache) index for a given pcpu.
++ * Returns the index number, or -1 on error.
++ */
++int virt_find_llc_index(int pcpu_id)
++{
++    int max_level = 0;
++    int llc_index = -1;
++
++    for (int idx = 0; idx < 10; idx++) {
++        g_autofree char *path = NULL;
++        g_autofree char *content = NULL;
++        GError *gerr = NULL;
++        int level;
++
++        path = g_strdup_printf(
++            "/sys/devices/system/cpu/cpu%d/cache/index%d/level",
++            pcpu_id, idx);
++        if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++            g_error_free(gerr);
++            break;  /* no more indices */
++        }
++        level = strtol(content, NULL, 10);
++        if (level > max_level) {
++            max_level = level;
++            llc_index = idx;
++        }
++    }
++    return llc_index;
++}
++
++/*
++ * Read cache info from sysfs for a given pcpu and cache index.
++ * Returns true on success, false on error.
++ */
++bool virt_read_cache_info(int pcpu_id, int cache_index,
++                          struct VirtCacheInfo *info)
++{
++    g_autofree char *path = NULL;
++    g_autofree char *content = NULL;
++    GError *gerr = NULL;
++    g_autofree char *type_str = NULL;
++    g_autofree char *attr_path = NULL;
++
++    /* Read level */
++    path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d/cache/index%d/level",
++        pcpu_id, cache_index);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        g_error_free(gerr);
++        return false;
++    }
++    g_free(path);
++    info->level = strtol(content, NULL, 10);
++
++    /* Read type */
++    attr_path = g_strdup_printf("cache/index%d/type", cache_index);
++    type_str = virt_read_pcpu_attr_str(pcpu_id, attr_path);
++    if (!type_str) {
++        return false;
++    }
++    g_strstrip(type_str);
++    if (g_str_has_prefix(type_str, "Data")) {
++        info->type = VIRT_CACHE_TYPE_DATA;
++    } else if (g_str_has_prefix(type_str, "Instruction")) {
++        info->type = VIRT_CACHE_TYPE_INSTRUCTION;
++    } else {
++        info->type = VIRT_CACHE_TYPE_UNIFIED;
++    }
++
++    /* Read size (e.g. "65536" or "64K") */
++    g_free(content);
++    content = NULL;
++    path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d/cache/index%d/size",
++        pcpu_id, cache_index);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        g_error_free(gerr);
++        return false;
++    }
++    g_free(path);
++    g_strstrip(content);
++    {
++        long sz = strtol(content, NULL, 10);
++        char *end = NULL;
++        strtol(content, &end, 10);
++        if (end && *end == 'K') {
++            sz *= 1024;
++        } else if (end && *end == 'M') {
++            sz *= 1024 * 1024;
++        }
++        info->size = (uint32_t)sz;
++    }
++
++    /* Read coherency_line_size */
++    g_free(content);
++    content = NULL;
++    path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d/cache/index%d/coherency_line_size",
++        pcpu_id, cache_index);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        g_error_free(gerr);
++        return false;
++    }
++    g_free(path);
++    info->line_size = (uint16_t)strtol(content, NULL, 10);
++
++    /* Read number_of_sets */
++    g_free(content);
++    content = NULL;
++    path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d/cache/index%d/number_of_sets",
++        pcpu_id, cache_index);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        g_error_free(gerr);
++        return false;
++    }
++    g_free(path);
++    info->sets = (uint32_t)strtol(content, NULL, 10);
++
++    /* Read ways_of_associativity */
++    g_free(content);
++    content = NULL;
++    path = g_strdup_printf(
++        "/sys/devices/system/cpu/cpu%d/cache/index%d/ways_of_associativity",
++        pcpu_id, cache_index);
++    if (!g_file_get_contents(path, &content, NULL, &gerr)) {
++        g_error_free(gerr);
++        return false;
++    }
++    info->associativity = (uint8_t)strtol(content, NULL, 10);
++
++    /* PPTT Attributes field:
++     *   Bits [1:0]: Allocation: 0=Read, 1=Write, 2/3=ReadWrite
++     *   Bits [3:2]: Cache type: 0=Data, 1=Instruction, 2/3=Unified
++     *   Bit  [4]:   Write policy: 0=WriteBack, 1=WriteThrough
++     *   Bits [7:5]: Reserved, must be zero
++     */
++    if (info->type == VIRT_CACHE_TYPE_INSTRUCTION) {
++        /* Read allocate | Instruction | WriteBack */
++        info->attributes = (0 << 4) | (1 << 2) | 0;  /* 0x04 */
++    } else if (info->type == VIRT_CACHE_TYPE_DATA) {
++        /* ReadWrite allocate | Data | WriteBack */
++        info->attributes = (0 << 4) | (0 << 2) | 2;  /* 0x02 */
++    } else {
++        /* ReadWrite allocate | Unified | WriteBack */
++        info->attributes = (0 << 4) | (2 << 2) | 2;  /* 0x0A */
++    }
++
++    info->share_scope = VIRT_CACHE_SHARE_CORE;
++
++    return true;
++}
++
++/*
++ * Determine the share scope of a cache by comparing its shared_cpu_list
++ * against the core/ccl/socket grouping in cpu_topology.
++ * Returns VIRT_CACHE_SHARE_CORE/CCL/SOCKET.
++ */
++int virt_determine_cache_share_scope(int pin_idx, int cache_index,
++                                     VirtMachineState *vms)
++{
++    int pcpu_id = vms->vcpu_pinning[pin_idx].pcpu_id;
++    g_autofree char *attr_path = g_strdup_printf(
++        "cache/index%d/shared_cpu_list", cache_index);
++    g_autofree char *shared_cpu_list = virt_read_pcpu_attr_str(pcpu_id,
++                                                                attr_path);
++    char *core_cpus_list = vms->vcpu_pinning[pin_idx].core_cpus_list;
++    char *cluster_cpus_list = vms->vcpu_pinning[pin_idx].cluster_cpus_list;
++
++    if (!shared_cpu_list) {
++        return VIRT_CACHE_SHARE_CORE;
++    }
++    g_strstrip(shared_cpu_list);
++
++    if (core_cpus_list && g_str_equal(shared_cpu_list, core_cpus_list)) {
++        return VIRT_CACHE_SHARE_CORE;
++    }
++
++    if (cluster_cpus_list && g_str_equal(shared_cpu_list, cluster_cpus_list)) {
++        return VIRT_CACHE_SHARE_CCL;
++    }
++
++    return VIRT_CACHE_SHARE_SOCKET;
++}
++
++/*
++ * Determine LLC binding strategy by comparing NUMA node cpu range
++ * with LLC cache shared cpu range.
++ *
++ * If NUMA node range == LLC cache range: LLC binds at socket level
++ * If LLC cache range == CCL range: LLC binds at CCL level
++ */
++static bool determine_llc_binding_strategy(int pcpu_id)
++{
++    g_autofree char *numa_cpulist = NULL;
++    g_autofree char *llc_cpulist = NULL;
++    g_autofree char *attr_path = NULL;
++    int llc_index;
++
++    /* Find which NUMA node this pcpu belongs to, then read its cpulist */
++    {
++        int node_id = virt_find_pcpu_node_id(pcpu_id);
++        g_autofree char *node_attr = g_strdup_printf("node%d/cpulist", node_id);
++        numa_cpulist = virt_read_pcpu_attr_str(pcpu_id, node_attr);
++    }
++    if (!numa_cpulist) {
++        /* Fallback: assume LLC at socket level */
++        return false;
++    }
++
++    /* Find LLC index and read its shared_cpu_list */
++    llc_index = virt_find_llc_index(pcpu_id);
++    if (llc_index < 0) {
++        return false;
++    }
++
++    attr_path = g_strdup_printf("cache/index%d/shared_cpu_list", llc_index);
++    llc_cpulist = virt_read_pcpu_attr_str(pcpu_id, attr_path);
++    if (!llc_cpulist) {
++        return false;
++    }
++
++    g_strstrip(numa_cpulist);
++    g_strstrip(llc_cpulist);
++
++    /* If NUMA node cpu range == LLC cache range, LLC at socket level */
++    return g_str_equal(numa_cpulist, llc_cpulist);
++}
++
++/* Helper to free a VirtTopoGroup when used as GHashTable value */
++static void virt_topo_group_free(gpointer data)
++{
++    VirtTopoGroup *grp = (VirtTopoGroup *)data;
++    if (grp->members) {
++        g_array_free(grp->members, true);
++    }
++    g_free(grp);
++}
++
++/*
++ * Derive virtual topology from pcpu topology.
++ *
++ * This implements the vCPU topology grouping logic from the design doc:
++ * 1. Check host topology to determine LLC binding strategy
++ * 2. For each vcpu, query pcpu topology (core_id, cluster_id, socket key)
++ *    and directly build cpu_topology groups using physical IDs as keys
++ */
++static void derive_auto_topology(VirtMachineState *vms)
++{
++    int i, j;
++    int next_vcore = 0;
++    int next_vcluster = 0;
++    int next_vsocket = 0;
++    int llc_index;
++    int first_pcpu;
++
++    /* Phase 1: Determine LLC binding strategy using the first pcpu */
++    first_pcpu = vms->vcpu_pinning[0].pcpu_id;
++    vms->llc_bind_at_socket = determine_llc_binding_strategy(first_pcpu);
++    llc_index = virt_find_llc_index(first_pcpu);
++
++    /* Initialize cpu_topology groups: physical ID -> VirtTopoGroup */
++    vms->cpu_topology.core_group = g_hash_table_new_full(g_direct_hash,
++        g_direct_equal, NULL, (GDestroyNotify)virt_topo_group_free);
++    vms->cpu_topology.ccl_group = g_hash_table_new_full(g_direct_hash,
++        g_direct_equal, NULL, (GDestroyNotify)virt_topo_group_free);
++    vms->cpu_topology.socket_group = g_hash_table_new_full(g_direct_hash,
++        g_direct_equal, NULL, (GDestroyNotify)virt_topo_group_free);
++
++    /*
++     * Phase 2: Iterate each vcpu, query pcpu topology to determine
++     * core/ccl/socket grouping, following the design doc flow:
++     *   - Read pcpu topology/core_id for core grouping
++     *   - Read pcpu topology/cluster_id for ccl grouping
++     *   - If LLC as socket basis: use LLC shared_cpu_list first cpu as socket key
++     *   - Else: use NUMA node id as socket key
++     * Directly build cpu_topology groups using physical IDs as keys.
++     */
++    for (i = 0; i < vms->nr_vcpu_pinning; i++) {
++        int pcpu_id = vms->vcpu_pinning[i].pcpu_id;
++        int vcpu_id = vms->vcpu_pinning[i].vcpu_id;
++        int phys_core = virt_read_pcpu_topology_attr(pcpu_id, "core_id");
++        int phys_cluster = virt_read_pcpu_topology_attr(pcpu_id, "cluster_id");
++        int phys_socket_key;
++
++        if (phys_core < 0) {
++            phys_core = 0;
++        }
++        if (phys_cluster < 0) {
++            phys_cluster = phys_core;  /* fallback */
++        }
++
++        /* Determine socket key based on LLC binding strategy */
++        if (vms->llc_bind_at_socket) {
++            /* Use LLC shared_cpu_list first cpu as socket key */
++            g_autofree char *attr_path = g_strdup_printf(
++                "cache/index%d/shared_cpu_list", llc_index);
++            g_autofree char *llc_cpulist = virt_read_pcpu_attr_str(pcpu_id,
++                                                               attr_path);
++            if (llc_cpulist) {
++                g_autofree char *copy = g_strdup(llc_cpulist);
++                char *dash, *comma;
++                g_strstrip(copy);
++                /* Parse the first cpu id from the list */
++                dash = strchr(copy, '-');
++                comma = strchr(copy, ',');
++                if (dash && (!comma || dash < comma)) {
++                    *dash = '\0';
++                } else if (comma) {
++                    *comma = '\0';
++                }
++                phys_socket_key = strtol(copy, NULL, 10);
++            } else {
++                phys_socket_key = virt_read_pcpu_topology_attr(pcpu_id,
++                                                          "physical_package_id");
++                if (phys_socket_key < 0) {
++                    phys_socket_key = 0;
++                }
++            }
++        } else {
++            /* Use NUMA node as socket key */
++            phys_socket_key = virt_find_pcpu_node_id(pcpu_id);
++        }
++
++        /*
++         * Build core_group: phys_core_id -> VirtTopoGroup
++         * If new core, assign next virtual ID; otherwise use existing vid.
++         * Append vcpu_id to the group's members array.
++         */
++        VirtTopoGroup *core_grp = g_hash_table_lookup(
++            vms->cpu_topology.core_group, GINT_TO_POINTER(phys_core));
++        if (!core_grp) {
++            core_grp = g_new0(VirtTopoGroup, 1);
++            core_grp->vid = next_vcore++;
++            core_grp->members = g_array_new(false, false, sizeof(int));
++            g_hash_table_insert(vms->cpu_topology.core_group,
++                                GINT_TO_POINTER(phys_core), core_grp);
++        }
++        vms->vcpu_pinning[i].vcore_id = core_grp->vid;
++        g_array_append_val(core_grp->members, vcpu_id);
++
++        /*
++         * Build ccl_group: phys_cluster_id -> VirtTopoGroup
++         * Members are phys_core_ids (deduplicated).
++         */
++        VirtTopoGroup *ccl_grp = g_hash_table_lookup(
++            vms->cpu_topology.ccl_group, GINT_TO_POINTER(phys_cluster));
++        if (!ccl_grp) {
++            ccl_grp = g_new0(VirtTopoGroup, 1);
++            ccl_grp->vid = next_vcluster++;
++            ccl_grp->members = g_array_new(false, false, sizeof(int));
++            g_hash_table_insert(vms->cpu_topology.ccl_group,
++                                GINT_TO_POINTER(phys_cluster), ccl_grp);
++        }
++        vms->vcpu_pinning[i].vcluster_id = ccl_grp->vid;
++        /* Deduplicate: only add phys_core if not already present */
++        {
++            bool found = false;
++            for (j = 0; j < (int)ccl_grp->members->len; j++) {
++                if (g_array_index(ccl_grp->members, int, j) == phys_core) {
++                    found = true;
++                    break;
++                }
++            }
++            if (!found) {
++                g_array_append_val(ccl_grp->members, phys_core);
++            }
++        }
++
++        /*
++         * Build socket_group: phys_socket_key -> VirtTopoGroup
++         * Members are phys_cluster_ids (deduplicated).
++         */
++        VirtTopoGroup *sock_grp = g_hash_table_lookup(
++            vms->cpu_topology.socket_group, GINT_TO_POINTER(phys_socket_key));
++        if (!sock_grp) {
++            sock_grp = g_new0(VirtTopoGroup, 1);
++            sock_grp->vid = next_vsocket++;
++            sock_grp->members = g_array_new(false, false, sizeof(int));
++            g_hash_table_insert(vms->cpu_topology.socket_group,
++                                GINT_TO_POINTER(phys_socket_key), sock_grp);
++        }
++        vms->vcpu_pinning[i].vsocket_id = sock_grp->vid;
++        /* Deduplicate: only add phys_cluster if not already present */
++        {
++            bool found = false;
++            for (j = 0; j < (int)sock_grp->members->len; j++) {
++                if (g_array_index(sock_grp->members, int, j) == phys_cluster) {
++                    found = true;
++                    break;
++                }
++            }
++            if (!found) {
++                g_array_append_val(sock_grp->members, phys_cluster);
++            }
++        }
++    }
++
++    vms->nr_vsockets = next_vsocket;
++    vms->nr_vclusters = next_vcluster;
++    vms->nr_vcores = next_vcore;
++}
++
++void qmp_set_vcpu_pinning(bool auto_topology,
++                          VcpuPinningInfoList *vcpu_pinning,
++                          Error **errp)
++{
++    MachineState *ms = MACHINE(qdev_get_machine());
++    VirtMachineState *vms = VIRT_MACHINE(ms);
++    VcpuPinningInfoList *entry;
++    int i;
++    int nr_entries = 0;
++    int max_vcpu_id = ms->smp.max_cpus - 1;
++
++    /* Must be called before vcpu threads are created */
++    if (runstate_check(RUN_STATE_RUNNING)) {
++        error_setg(errp, "set-vcpu-pinning must be called before VM startup");
++        return;
++    }
++
++    /* Validate: auto_topology must be true for now */
++    if (!auto_topology) {
++        error_setg(errp, "auto-topology must be set to true");
++        return;
++    }
++
++    /* Count entries */
++    for (entry = vcpu_pinning; entry; entry = entry->next) {
++        nr_entries++;
++    }
++
++    if (nr_entries == 0) {
++        error_setg(errp, "vcpu-pinning array must not be empty");
++        return;
++    }
++
++    /* Validate each entry */
++    for (entry = vcpu_pinning; entry; entry = entry->next) {
++        int vcpu_id = entry->value->vcpu_id;
++        int pcpu_id = entry->value->pcpu_id;
++
++        if (vcpu_id < 0 || vcpu_id > max_vcpu_id) {
++            error_setg(errp, "vcpu-id %d is out of range (0-%d)",
++                       vcpu_id, max_vcpu_id);
++            return;
++        }
++
++        if (!pcpu_is_online(pcpu_id)) {
++            error_setg(errp, "pcpu-id %d is not online", pcpu_id);
++            return;
++        }
++    }
++
++    /* Check for duplicate vcpu-id entries */
++    for (entry = vcpu_pinning; entry; entry = entry->next) {
++        VcpuPinningInfoList *other;
++        for (other = entry->next; other; other = other->next) {
++            if (entry->value->vcpu_id == other->value->vcpu_id) {
++                error_setg(errp, "duplicate vcpu-id %d",
++                           entry->value->vcpu_id);
++                return;
++            }
++        }
++    }
++
++    /* Free any previously allocated topology data */
++    if (vms->vcpu_pinning) {
++        for (int j = 0; j < vms->nr_vcpu_pinning; j++) {
++            g_free(vms->vcpu_pinning[j].core_cpus_list);
++            g_free(vms->vcpu_pinning[j].cluster_cpus_list);
++        }
++    }
++    g_free(vms->vcpu_pinning);
++    if (vms->cpu_topology.core_group) {
++        g_hash_table_destroy(vms->cpu_topology.core_group);
++        vms->cpu_topology.core_group = NULL;
++    }
++    if (vms->cpu_topology.ccl_group) {
++        g_hash_table_destroy(vms->cpu_topology.ccl_group);
++        vms->cpu_topology.ccl_group = NULL;
++    }
++    if (vms->cpu_topology.socket_group) {
++        g_hash_table_destroy(vms->cpu_topology.socket_group);
++        vms->cpu_topology.socket_group = NULL;
++    }
++
++    /* Store pinning info */
++    vms->auto_topology = auto_topology;
++    vms->nr_vcpu_pinning = nr_entries;
++    vms->vcpu_pinning = g_new0(struct VcpuAutoTopologyEntry, nr_entries);
++
++    for (entry = vcpu_pinning, i = 0; entry; entry = entry->next, i++) {
++        int pcpu_id = entry->value->pcpu_id;
++        vms->vcpu_pinning[i].vcpu_id = entry->value->vcpu_id;
++        vms->vcpu_pinning[i].pcpu_id = pcpu_id;
++        /* Cache topology cpulist strings to avoid repeated sysfs reads */
++        vms->vcpu_pinning[i].core_cpus_list =
++            virt_read_pcpu_attr_str(pcpu_id, "topology/core_cpus_list");
++        if (vms->vcpu_pinning[i].core_cpus_list) {
++            g_strstrip(vms->vcpu_pinning[i].core_cpus_list);
++        }
++        vms->vcpu_pinning[i].cluster_cpus_list =
++            virt_read_pcpu_attr_str(pcpu_id, "topology/cluster_cpus_list");
++        if (vms->vcpu_pinning[i].cluster_cpus_list) {
++            g_strstrip(vms->vcpu_pinning[i].cluster_cpus_list);
++        }
++    }
++
++    /* Derive virtual topology from physical topology */
++    derive_auto_topology(vms);
++
++    /* Update possible_cpus props to reflect the auto topology */
++    if (ms->possible_cpus) {
++        for (i = 0; i < vms->nr_vcpu_pinning; i++) {
++            int vcpu_id = vms->vcpu_pinning[i].vcpu_id;
++            if (vcpu_id < ms->possible_cpus->len) {
++                ms->possible_cpus->cpus[vcpu_id].props.socket_id =
++                    vms->vcpu_pinning[i].vsocket_id;
++                ms->possible_cpus->cpus[vcpu_id].props.cluster_id =
++                    vms->vcpu_pinning[i].vcluster_id;
++                ms->possible_cpus->cpus[vcpu_id].props.core_id =
++                    vms->vcpu_pinning[i].vcore_id;
++            }
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index c8a0993980..9fcc04a28b 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -4501,6 +4501,28 @@ static void virt_set_kvm_type(Object *obj, const char *value, Error **errp G_GNU
+     vms->kvm_type = g_strdup(value);
+ }
+ 
++static void virt_instance_finalize(Object *obj)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    if (vms->vcpu_pinning) {
++        for (int i = 0; i < vms->nr_vcpu_pinning; i++) {
++            g_free(vms->vcpu_pinning[i].core_cpus_list);
++            g_free(vms->vcpu_pinning[i].cluster_cpus_list);
++        }
++        g_free(vms->vcpu_pinning);
++    }
++    if (vms->cpu_topology.core_group) {
++        g_hash_table_destroy(vms->cpu_topology.core_group);
++    }
++    if (vms->cpu_topology.ccl_group) {
++        g_hash_table_destroy(vms->cpu_topology.ccl_group);
++    }
++    if (vms->cpu_topology.socket_group) {
++        g_hash_table_destroy(vms->cpu_topology.socket_group);
++    }
++}
++
+ static void virt_instance_init(Object *obj)
+ {
+     VirtMachineState *vms = VIRT_MACHINE(obj);
+@@ -4587,7 +4609,8 @@ static const TypeInfo virt_machine_info = {
+     .instance_size = sizeof(VirtMachineState),
+     .class_size    = sizeof(VirtMachineClass),
+     .class_init    = virt_machine_class_init,
+-    .instance_init = virt_instance_init,
++    .instance_init    = virt_instance_init,
++    .instance_finalize = virt_instance_finalize,
+     .interfaces = (InterfaceInfo[]) {
+          { TYPE_HOTPLUG_HANDLER },
+          { }
+@@ -4836,4 +4859,4 @@ static void virt_machine_2_6_options(MachineClass *mc)
+     /* Disable PMU for 2.6 as PMU support was first introduced in 2.7 */
+     vmc->no_pmu = true;
+ }
+-DEFINE_VIRT_MACHINE(2, 6)
++DEFINE_VIRT_MACHINE(2, 6)
+\ No newline at end of file
+diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
+index e0f9414b3a..c217ed5e16 100644
+--- a/include/hw/arm/virt.h
++++ b/include/hw/arm/virt.h
+@@ -62,6 +62,7 @@
+ #define CTYPE_UNIFIED  0b100
+ 
+ #define ARM64_REG_CLIDR_EL1 ARM64_SYS_REG(3, 1, 0, 0, 1)
++#define ARM64_REG_CTR_EL0   ARM64_SYS_REG(3, 3, 0, 0, 1)
+ 
+ #define CLIDR_CTYPE_SHIFT(level) (3 * (level - 1))
+ #define CLIDR_CTYPE_MASK(level) (7 << CLIDR_CTYPE_SHIFT(level))
+@@ -208,6 +209,35 @@ typedef enum VirtGICType {
+ #define VIRT_GIC_VERSION_3_MASK BIT(VIRT_GIC_VERSION_3)
+ #define VIRT_GIC_VERSION_4_MASK BIT(VIRT_GIC_VERSION_4)
+ 
++/* Topology group: maps physical ID to virtual ID + child members */
++typedef struct VirtTopoGroup {
++    int vid;           /* virtual id (0-based consecutive) */
++    GArray *members;   /* array of child ids (int) */
++} VirtTopoGroup;
++
++/* Cache info read from host sysfs for PPTT construction */
++struct VirtCacheInfo {
++    uint32_t size;              /* cache size in bytes */
++    uint32_t sets;              /* number of sets */
++    uint8_t  associativity;     /* ways of associativity */
++    uint8_t  attributes;        /* cache attributes (write-back, etc.) */
++    uint16_t line_size;         /* cache line size in bytes */
++    int      level;             /* cache level (1, 2, 3) */
++    int      type;              /* 0=Instruction, 1=Data, 2=Unified (matches CLIDR CTYPE bit) */
++    int      share_scope;       /* 0=core, 1=ccl, 2=socket */
++};
++
++struct VirtMachineState;
++
++/* Auto-topology helper functions (defined in virt-vcpu-pinning.c) */
++char *virt_read_pcpu_attr_str(int pcpu_id, const char *attr);
++int virt_read_pcpu_topology_attr(int pcpu_id, const char *attr);
++int virt_find_llc_index(int pcpu_id);
++bool virt_read_cache_info(int pcpu_id, int cache_index,
++                          struct VirtCacheInfo *info);
++int virt_determine_cache_share_scope(int pin_idx, int cache_index,
++                                     struct VirtMachineState *vms);
++
+ struct VirtMachineClass {
+     MachineClass parent;
+     bool disallow_affinity_adjustment;
+@@ -300,6 +330,41 @@ struct VirtMachineState {
+     char *kvm_type;
+     NotifierList cpuhp_notifiers;
+     Object *event_log;
++
++    /* Flexible CCL / auto-topology state, set via QMP set-vcpu-pinning */
++    bool auto_topology;
++    int nr_vcpu_pinning;
++
++    /* LLC cache binding strategy, determined by host topology check */
++    bool llc_bind_at_socket;  /* true: LLC at socket level, false: LLC at CCL */
++
++    struct VcpuAutoTopologyEntry {
++        int vcpu_id;
++        int pcpu_id;
++        int vcore_id;      /* virtual core id (from physical core_id) */
++        int vcluster_id;   /* virtual CCL id (renumbered from 0) */
++        int vsocket_id;    /* virtual socket id (renumbered from 0) */
++        /* Cached sysfs strings to avoid repeated file reads */
++        char *core_cpus_list;     /* topology/core_cpus_list */
++        char *cluster_cpus_list;  /* topology/cluster_cpus_list */
++    } *vcpu_pinning;
++
++    /*
++     * cpu_topology: core/ccl/socket grouping structure
++     * Key is physical ID, value is VirtTopoGroup with virtual ID and members.
++     *   core_group:   phys_core_id    -> VirtTopoGroup (members: vcpu_ids)
++     *   ccl_group:    phys_cluster_id  -> VirtTopoGroup (members: phys_core_ids)
++     *   socket_group: phys_socket_key  -> VirtTopoGroup (members: phys_cluster_ids)
++     */
++    struct VirtCpuTopology {
++        GHashTable *core_group;
++        GHashTable *ccl_group;
++        GHashTable *socket_group;
++    } cpu_topology;
++
++    int nr_vsockets;
++    int nr_vclusters;
++    int nr_vcores;
+ };
+ 
+ #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
+@@ -347,4 +412,4 @@ static inline bool virt_has_smmuv3(const VirtMachineState *vms)
+            vms->iommu == VIRT_IOMMU_SMMUV3_ACCEL;
+ }
+ 
+-#endif /* QEMU_ARM_VIRT_H */
++#endif /* QEMU_ARM_VIRT_H */
+\ No newline at end of file
+diff --git a/qapi/machine-target.json b/qapi/machine-target.json
+index 7b7149f81c..92de192655 100644
+--- a/qapi/machine-target.json
++++ b/qapi/machine-target.json
+@@ -486,3 +486,54 @@
+   'features': [ 'unstable' ],
+   'if': { 'all': [ 'TARGET_S390X', 'CONFIG_KVM' ] }
+ }
++
++##
++# @VcpuPinningInfo:
++#
++# A vcpu-to-pcpu pinning mapping entry.
++#
++# @vcpu-id: virtual CPU index
++#
++# @pcpu-id: physical CPU index that this vcpu is pinned to
++#
++# Since: 8.10
++##
++{ 'struct': 'VcpuPinningInfo',
++  'data': { 'vcpu-id': 'int',
++            'pcpu-id': 'int' },
++  'if': { 'all': [ 'TARGET_ARM', 'CONFIG_KVM' ] } }
++
++##
++# @set-vcpu-pinning:
++#
++# Set the vcpu-to-pcpu pinning mapping for the virtual machine. This
++# command must be called before vcpu threads are created, during the
++# VM startup phase. When auto-topology is enabled, QEMU will query
++# the host's sysfs topology information for each pcpu and derive the
++# virtual CCL/socket topology accordingly, then build the PPTT table
++# based on the derived virtual topology.
++#
++# @auto-topology: whether to enable flexible CCL topology derivation.
++#     When true, QEMU derives virtual CCL and socket topology from
++#     the physical topology of the pinned pcpus.
++#
++# @vcpu-pinning: array of vcpu-to-pcpu pinning mappings
++#
++# Features:
++#
++# @unstable: This command is experimental.
++#
++# Returns: Nothing on success.
++#
++# Errors:
++#     - If @vcpu-id is out of range
++#     - If @pcpu-id is not online on the host
++#     - If the VM has already started (vcpu threads created)
++#
++# Since: 8.10
++##
++{ 'command': 'set-vcpu-pinning',
++  'data': { 'auto-topology': 'bool',
++            'vcpu-pinning': [ 'VcpuPinningInfo' ] },
++  'features': [ 'unstable' ],
++  'if': { 'all': [ 'TARGET_ARM', 'CONFIG_KVM' ] } }
+\ No newline at end of file
+-- 
+2.43.0
+

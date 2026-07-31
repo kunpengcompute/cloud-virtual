@@ -1,0 +1,596 @@
+From 1f9befa9999e2c654f9f0e1cf33aa08f9328ea77 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt@live.cn>
+Date: Tue, 4 Aug 2026 15:52:14 +0800
+Subject: [PATCH 2/2] [qemu-8.2]build pptt auto topology
+
+---
+ hw/arm/virt-acpi-build.c | 512 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 507 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/virt-acpi-build.c b/hw/arm/virt-acpi-build.c
+index 073fb4d4e5..9fbbaabea4 100644
+--- a/hw/arm/virt-acpi-build.c
++++ b/hw/arm/virt-acpi-build.c
+@@ -53,6 +53,8 @@
+ #include "hw/mem/nvdimm.h"
+ #include "hw/platform-bus.h"
+ #include "sysemu/numa.h"
++#include "sysemu/accel-blocker.h"
++#include "sysemu/kvm.h"
+ #include "sysemu/reset.h"
+ #include "sysemu/tpm.h"
+ #include "migration/vmstate.h"
+@@ -71,6 +73,8 @@
+ 
+ #define ACPI_BUILD_TABLE_SIZE             0x20000
+ 
++static uint32_t cache_id_counter = 0;
++
+ /*
+  * ACPI spec, Revision 6.3
+  * 5.2.29.2 Cache Type Structure (Type 1)
+@@ -79,7 +83,7 @@ static void build_cache_hierarchy_node(GArray *tbl, uint32_t next_level,
+                                        uint32_t cache_type)
+ {
+     build_append_byte(tbl, 1);
+-    build_append_byte(tbl, 24);
++    build_append_byte(tbl, 28);
+     build_append_int_noprefix(tbl, 0, 2);
+     build_append_int_noprefix(tbl, 127, 4);
+     build_append_int_noprefix(tbl, next_level, 4);
+@@ -126,16 +130,503 @@ static void build_cache_hierarchy_node(GArray *tbl, uint32_t next_level,
+         build_append_byte(tbl, 0);
+         build_append_byte(tbl, 0);
+         build_append_int_noprefix(tbl, 0, 2);
++        break;
++    }
++
++    /* Cache ID (PPTT rev 3+) */
++    build_append_int_noprefix(tbl, cache_id_counter++, 4);
++}
++
++/*
++ * Build a PPTT cache Type 1 node from VirtCacheInfo read from host sysfs.
++ */
++static void build_cache_node_from_info(GArray *tbl,
++                                       const struct VirtCacheInfo *info,
++                                       uint32_t next_level)
++{
++    build_append_byte(tbl, 1);   /* Type 1 - cache */
++    build_append_byte(tbl, 28);  /* Length (PPTT rev 3: +4 bytes cache_id) */
++    build_append_int_noprefix(tbl, 0, 2);  /* Reserved */
++    build_append_int_noprefix(tbl, 127, 4); /* Falgs: Number of private resources */
++    build_append_int_noprefix(tbl, next_level, 4);
++
++    build_append_int_noprefix(tbl, info->size, 4);
++    build_append_int_noprefix(tbl, info->sets, 4);
++    build_append_byte(tbl, info->associativity);
++    build_append_byte(tbl, info->attributes);
++    build_append_int_noprefix(tbl, info->line_size, 2);
++
++    /* Cache ID (PPTT rev 3+) */
++    build_append_int_noprefix(tbl, cache_id_counter++, 4);
++}
++
++/*
++ * Build PPTT core node (with core-level caches) and its vcpu processor nodes
++ * under a given cluster parent.
++ */
++static void build_pptt_auto_core(GArray *table_data, VirtMachineState *vms,
++                                 guint pptt_start, uint32_t cluster_offset,
++                                 int vccl, int llc_index, bool unified_l1,
++                                 VirtTopoGroup *core_grp)
++{
++    int vcore = core_grp->vid;
++    int core_repr_pcpu = -1;
++    int core_repr_idx = -1;
++    uint32_t core_priv_rsrc[8] = {};
++    int core_priv_num = 0;
++    int n, idx, m;
++    bool has_sysfs_cache = false;
++
++    /* Find representative pcpu for this core */
++    for (n = 0; n < vms->nr_vcpu_pinning; n++) {
++        if (vms->vcpu_pinning[n].vcore_id == vcore) {
++            if (core_repr_pcpu < 0 ||
++                vms->vcpu_pinning[n].pcpu_id < core_repr_pcpu) {
++                core_repr_pcpu = vms->vcpu_pinning[n].pcpu_id;
++                core_repr_idx = n;
++            }
++        }
++    }
++
++    /* Read core-level caches from sysfs */
++    {
++        struct VirtCacheInfo core_caches[10];
++        uint32_t core_cache_offsets[10];  /* per-cache PPTT offset */
++        int core_cache_count = 0;
++        int a, b;
++        int min_level;
++
++        for (idx = 0; idx < 10; idx++) {
++            struct VirtCacheInfo cinfo = {};
++
++            if (idx == llc_index) {
++                continue;
++            }
++
++            if (!virt_read_cache_info(core_repr_pcpu, idx, &cinfo)) {
++                break;
++            }
++
++            cinfo.share_scope = virt_determine_cache_share_scope(
++                core_repr_idx, idx, vms);
++
++            if (cinfo.share_scope == 0 /* VIRT_CACHE_SHARE_CORE */) {
++                core_caches[core_cache_count++] = cinfo;
++            }
++        }
++
++        if (core_cache_count > 0) {
++            /* Sort by level descending: build highest level first */
++            for (a = 0; a < core_cache_count - 1; a++) {
++                for (b = a + 1; b < core_cache_count; b++) {
++                    if (core_caches[b].level > core_caches[a].level) {
++                        struct VirtCacheInfo tmp = core_caches[a];
++                        core_caches[a] = core_caches[b];
++                        core_caches[b] = tmp;
++                    }
++                }
++            }
++
++            /* Find minimum level (the immediate caches for this core) */
++            min_level = core_caches[0].level;
++            for (a = 1; a < core_cache_count; a++) {
++                if (core_caches[a].level < min_level) {
++                    min_level = core_caches[a].level;
++                }
++            }
++
++            /* Build cache nodes from highest to lowest level.
++             * Each cache's next_level points to the cache at level+1.
++             * Track each cache's offset individually to avoid
++             * overwriting when multiple caches share the same level.
++             */
++            for (a = 0; a < core_cache_count; a++) {
++                uint32_t nl = 0;
++                /* Find next-level cache offset (level + 1) */
++                for (b = 0; b < a; b++) {
++                    if (core_caches[b].level == core_caches[a].level + 1) {
++                        nl = core_cache_offsets[b];
++                        break;
++                    }
++                }
++                core_cache_offsets[a] = table_data->len - pptt_start;
++                build_cache_node_from_info(table_data, &core_caches[a], nl);
++            }
++
++            /* Only add caches at the minimum level as private resources.
++             * Higher-level caches are reached via next_level chain.
++             */
++            for (a = 0; a < core_cache_count && core_priv_num < 8; a++) {
++                if (core_caches[a].level == min_level) {
++                    core_priv_rsrc[core_priv_num++] = core_cache_offsets[a];
++                }
++            }
++            has_sysfs_cache = true;
++        }
++    }
++
++    /* Fallback to hardcoded cache if no sysfs info */
++    if (!has_sysfs_cache) {
++        core_priv_rsrc[0] = table_data->len - pptt_start;
++        build_cache_hierarchy_node(table_data, 0, ARM_L2_CACHE);
++        if (unified_l1) {
++            core_priv_rsrc[1] = table_data->len - pptt_start;
++            build_cache_hierarchy_node(table_data,
++                                       core_priv_rsrc[0], ARM_L1_CACHE);
++            core_priv_num = 2;
++        } else {
++            core_priv_rsrc[1] = table_data->len - pptt_start;
++            build_cache_hierarchy_node(table_data,
++                                       core_priv_rsrc[0], ARM_L1D_CACHE);
++            core_priv_rsrc[2] = table_data->len - pptt_start;
++            build_cache_hierarchy_node(table_data,
++                                       core_priv_rsrc[0], ARM_L1I_CACHE);
++            core_priv_num = 3;
++        }
++    }
++
++    /* Build vcpu (processor) nodes under this core */
++    for (m = 0; m < (int)core_grp->members->len; m++) {
++        int vcpu_id = g_array_index(core_grp->members, int, m);
++
++        build_processor_hierarchy_node(
++            table_data,
++            (1 << 1) |  /* ACPI Processor ID valid */
++            (1 << 3),    /* Node is a Leaf */
++            cluster_offset, vcpu_id,
++            core_priv_rsrc, core_priv_num);
+     }
+ }
+ 
+ /*
+  * ACPI spec, Revision 6.3
+  * 5.2.29 Processor Properties Topology Table (PPTT)
++ *
++ * Build auto-topology PPTT from derived virtual topology.
++ *
++ * llc_bind_at_socket == true:  LLC at socket level (NUMA == LLC range)
++ * llc_bind_at_socket == false: LLC at CCL level (LLC == CCL range)
++ */
++static void build_pptt_auto_topology(GArray *table_data, VirtMachineState *vms,
++                                     guint pptt_start, bool unified_l1)
++{
++    int llc_index = virt_find_llc_index(vms->vcpu_pinning[0].pcpu_id);
++    GHashTableIter sock_iter;
++    gpointer skey, svalue;
++
++    /* Build socket nodes */
++    g_hash_table_iter_init(&sock_iter, vms->cpu_topology.socket_group);
++    while (g_hash_table_iter_next(&sock_iter, &skey, &svalue)) {
++        VirtTopoGroup *sock_grp = (VirtTopoGroup *)svalue;
++        int vsock = sock_grp->vid;
++        int sock_repr_pcpu = -1;
++        int n;
++        uint32_t socket_offset;
++
++        /* Find representative pcpu (smallest) for this socket */
++        for (n = 0; n < vms->nr_vcpu_pinning; n++) {
++            if (vms->vcpu_pinning[n].vsocket_id == vsock) {
++                if (sock_repr_pcpu < 0 ||
++                    vms->vcpu_pinning[n].pcpu_id < sock_repr_pcpu) {
++                    sock_repr_pcpu = vms->vcpu_pinning[n].pcpu_id;
++                }
++            }
++        }
++
++        if (vms->llc_bind_at_socket) {
++            /* Strategy 2: LLC at socket level */
++            uint32_t l3_cache_offset;
++            struct VirtCacheInfo llc_info = {};
++
++            if (llc_index >= 0 &&
++                virt_read_cache_info(sock_repr_pcpu, llc_index, &llc_info)) {
++                l3_cache_offset = table_data->len - pptt_start;
++                build_cache_node_from_info(table_data, &llc_info, 0);
++            } else {
++                l3_cache_offset = table_data->len - pptt_start;
++                build_cache_hierarchy_node(table_data, 0, ARM_L3_CACHE);
++            }
++            socket_offset = table_data->len - pptt_start;
++            build_processor_hierarchy_node(
++                table_data,
++                (1 << 0),  /* Physical package */
++                0, vsock, &l3_cache_offset, 1);
++        } else {
++            /* Strategy 1: LLC at CCL level, socket has no cache */
++            socket_offset = table_data->len - pptt_start;
++            build_processor_hierarchy_node(
++                table_data,
++                (1 << 0),  /* Physical package */
++                0, vsock, NULL, 0);
++        }
++
++        /* Build cluster (CCL) nodes under this socket */
++        for (n = 0; n < (int)sock_grp->members->len; n++) {
++            int phys_cluster = g_array_index(sock_grp->members, int, n);
++            VirtTopoGroup *ccl_grp = g_hash_table_lookup(
++                vms->cpu_topology.ccl_group, GINT_TO_POINTER(phys_cluster));
++            int vccl = ccl_grp->vid;
++            int ccl_repr_pcpu = -1;
++            int ccl_repr_idx = -1;
++            uint32_t cluster_offset;
++            uint32_t priv_rsrc[8] = {};
++            int priv_num = 0;
++            int idx, k;
++
++            /* Find representative pcpu for this ccl */
++            for (k = 0; k < vms->nr_vcpu_pinning; k++) {
++                if (vms->vcpu_pinning[k].vcluster_id == vccl) {
++                    if (ccl_repr_pcpu < 0 ||
++                        vms->vcpu_pinning[k].pcpu_id < ccl_repr_pcpu) {
++                        ccl_repr_pcpu = vms->vcpu_pinning[k].pcpu_id;
++                        ccl_repr_idx = k;
++                    }
++                }
++            }
++
++            /* Collect CCL-level caches (including LLC if at CCL level) */
++            {
++                struct VirtCacheInfo ccl_caches[10];
++                uint32_t ccl_cache_offsets[10];  /* per-cache PPTT offset */
++                int ccl_cache_count = 0;
++                int a, b;
++                int min_level;
++
++                /* Add LLC if it's at CCL level */
++                if (!vms->llc_bind_at_socket && llc_index >= 0) {
++                    struct VirtCacheInfo llc_info = {};
++                    if (virt_read_cache_info(ccl_repr_pcpu, llc_index,
++                                             &llc_info)) {
++                        ccl_caches[ccl_cache_count++] = llc_info;
++                    }
++                }
++
++                /* Read non-LLC caches for this ccl */
++                for (idx = 0; idx < 10; idx++) {
++                    struct VirtCacheInfo cinfo = {};
++
++                    if (idx == llc_index) {
++                        continue;
++                    }
++
++                    if (!virt_read_cache_info(ccl_repr_pcpu, idx, &cinfo)) {
++                        break;
++                    }
++
++                    cinfo.share_scope = virt_determine_cache_share_scope(
++                        ccl_repr_idx, idx, vms);
++
++                    if (cinfo.share_scope == 1 /* VIRT_CACHE_SHARE_CCL */) {
++                        ccl_caches[ccl_cache_count++] = cinfo;
++                    }
++                }
++
++                if (ccl_cache_count > 0) {
++                    /* Sort by level descending: build highest level first */
++                    for (a = 0; a < ccl_cache_count - 1; a++) {
++                        for (b = a + 1; b < ccl_cache_count; b++) {
++                            if (ccl_caches[b].level > ccl_caches[a].level) {
++                                struct VirtCacheInfo tmp = ccl_caches[a];
++                                ccl_caches[a] = ccl_caches[b];
++                                ccl_caches[b] = tmp;
++                            }
++                        }
++                    }
++
++                    /* Find minimum level (the immediate caches for this CCL) */
++                    min_level = ccl_caches[0].level;
++                    for (a = 1; a < ccl_cache_count; a++) {
++                        if (ccl_caches[a].level < min_level) {
++                            min_level = ccl_caches[a].level;
++                        }
++                    }
++
++                    /* Build cache nodes from highest to lowest level.
++                     * Track each cache's offset individually.
++                     */
++                    for (a = 0; a < ccl_cache_count; a++) {
++                        uint32_t nl = 0;
++                        for (b = 0; b < a; b++) {
++                            if (ccl_caches[b].level == ccl_caches[a].level + 1) {
++                                nl = ccl_cache_offsets[b];
++                                break;
++                            }
++                        }
++                        ccl_cache_offsets[a] = table_data->len - pptt_start;
++                        build_cache_node_from_info(table_data,
++                                                   &ccl_caches[a], nl);
++                    }
++
++                    /* Only add caches at minimum level as private resources */
++                    for (a = 0; a < ccl_cache_count && priv_num < 8; a++) {
++                        if (ccl_caches[a].level == min_level) {
++                            priv_rsrc[priv_num++] = ccl_cache_offsets[a];
++                        }
++                    }
++                } else if (!vms->llc_bind_at_socket) {
++                    /* Fallback: no sysfs LLC info, use hardcoded L3 */
++                    priv_rsrc[priv_num] = table_data->len - pptt_start;
++                    build_cache_hierarchy_node(table_data, 0, ARM_L3_CACHE);
++                    priv_num++;
++                }
++            }
++
++            cluster_offset = table_data->len - pptt_start;
++            build_processor_hierarchy_node(
++                table_data,
++                (0 << 0),  /* Not a physical package */
++                socket_offset, vccl,
++                priv_num ? priv_rsrc : NULL, priv_num);
++
++            /* Build core nodes under this cluster */
++            for (k = 0; k < (int)ccl_grp->members->len; k++) {
++                int phys_core = g_array_index(ccl_grp->members, int, k);
++                VirtTopoGroup *core_grp = g_hash_table_lookup(
++                    vms->cpu_topology.core_group,
++                    GINT_TO_POINTER(phys_core));
++
++                build_pptt_auto_core(table_data, vms, pptt_start,
++                                     cluster_offset, vccl, llc_index,
++                                     unified_l1, core_grp);
++            }
++        }
++    }
++}
++
++/*
++ * Update CLIDR_EL1 for each vcpu based on the PPTT cache topology.
++ * Called after build_pptt_auto_topology, when vcpu objects are guaranteed
++ * to exist.
++ *
++ * For each vcpu:
++ *   1. Read CLIDR_EL1 and CTR_EL0 via KVM_GET_ONE_REG
++ *   2. Derive CTYPEn from the vcpu's cache topology (PPTT nodes)
++ *   3. Set LOC = LLC cache level
++ *   4. If CTR_EL0.IDC == 1: LOUIS=0, LOUU=0
++ *      Else: LOUIS=LOC, LOUU=LOC
++ *   5. Keep ICB unchanged
++ *   6. Write back via KVM_SET_ONE_REG
+  */
+-static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState *ms,
++static void update_vcpu_clidr(VirtMachineState *vms)
++{
++    int llc_index = virt_find_llc_index(vms->vcpu_pinning[0].pcpu_id);
++    int i;
++
++    /*
++     * Kick all vCPUs out of KVM_RUN and wait for them to exit ioctl.
++     * This prevents deadlock: KVM holds vCPU mutex during KVM_RUN,
++     * so KVM_GET_ONE_REG/KVM_SET_ONE_REG on a vCPU in KVM_RUN would
++     * block. accel_ioctl_inhibit_begin() ensures no vCPU is inside
++     * KVM_RUN, and accel_cpu_ioctl_begin() skips in_ioctl_lock when
++     * BQL is held, so kvm_vcpu_ioctl() works safely afterwards.
++     */
++    accel_ioctl_inhibit_begin();
++
++    for (i = 0; i < vms->nr_vcpu_pinning; i++) {
++        int vcpu_id = vms->vcpu_pinning[i].vcpu_id;
++        int pcpu_id = vms->vcpu_pinning[i].pcpu_id;
++        ARMCPU *armcpu = ARM_CPU(qemu_get_cpu(vcpu_id));
++        CPUState *cs = CPU(armcpu);
++        uint64_t clidr, ctr;
++        int ret, idx;
++        int max_cache_level = 0;
++        int llc_level = 0;
++        uint8_t ctype_per_level[8] = {};  /* ctype value per cache level */
++
++        struct kvm_one_reg clidr_reg = {
++            .id = ARM64_REG_CLIDR_EL1,
++            .addr = (uintptr_t)&clidr
++        };
++        struct kvm_one_reg ctr_reg = {
++            .id = ARM64_REG_CTR_EL0,
++            .addr = (uintptr_t)&ctr
++        };
++
++        /* Read current CLIDR and CTR_EL0 */
++        ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &clidr_reg);
++        if (ret) {
++            error_report("Get vCPU%d CLIDR_EL1 failed: %d", vcpu_id, ret);
++            continue;
++        }
++        ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &ctr_reg);
++        if (ret) {
++            error_report("Get vCPU%d CTR_EL0 failed: %d", vcpu_id, ret);
++            continue;
++        }
++
++        /* Build CTYPEn from sysfs cache info for this pcpu */
++        for (idx = 0; idx < 10; idx++) {
++            struct VirtCacheInfo cinfo = {};
++
++            if (!virt_read_cache_info(pcpu_id, idx, &cinfo)) {
++                break;
++            }
++
++            cinfo.share_scope = virt_determine_cache_share_scope(
++                i, idx, vms);
++
++            /* Determine CTYPE value for this cache's level */
++            if (cinfo.level >= 1 && cinfo.level <= 7) {
++                /*
++                 * cinfo.type encoding matches CLIDR CTYPE bit layout:
++                 *   0=Instruction(bit0), 1=Data(bit1), 2=Unified(bit2)
++                 * So ctype_val = 1 << cinfo.type
++                 */
++                /* Merge cache types: CTYPE_INS(001) | CTYPE_DATA(010) = CTYPE_INS_DATA(011) */
++                ctype_per_level[cinfo.level] |= 1 << cinfo.type;
++
++                if (cinfo.level > max_cache_level) {
++                    max_cache_level = cinfo.level;
++                }
++
++                /* Track LLC level */
++                if (idx == llc_index) {
++                    llc_level = cinfo.level;
++                }
++            }
++        }
++
++        /* If no LLC found from sysfs, use max_cache_level as LLC level */
++        if (llc_level == 0 && max_cache_level > 0) {
++            llc_level = max_cache_level;
++        }
++
++        /* Update CTYPEn fields in CLIDR */
++        for (idx = 1; idx <= 7; idx++) {
++            clidr &= ~CLIDR_CTYPE_MASK(idx);
++            if (ctype_per_level[idx]) {
++                clidr |= ((uint64_t)ctype_per_level[idx] <<
++                          CLIDR_CTYPE_SHIFT(idx));
++            }
++        }
++
++        /* Update LOC = LLC level */
++        clidr &= ~(0x7ULL << 24);
++        clidr |= ((uint64_t)llc_level << 24);
++
++        /* Update LOUU and LOUIS based on CTR_EL0.IDC */
++        clidr &= ~(0x7ULL << 27);  /* LOUU = 0 */
++        clidr &= ~(0x7ULL << 21);  /* LOUIS = 0 */
++        if (!((ctr >> 28) & 1)) {  /* IDC == 0 */
++            clidr |= ((uint64_t)llc_level << 27);  /* LOUU = LOC */
++            clidr |= ((uint64_t)llc_level << 21);  /* LOUIS = LOC */
++        }
++
++        /* Write back CLIDR */
++        ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &clidr_reg);
++        if (ret) {
++            error_report("Set vCPU%d CLIDR_EL1 failed: %d", vcpu_id, ret);
++        }
++    }
++
++    /* Allow vCPUs to re-enter KVM_RUN */
++    accel_ioctl_inhibit_end();
++}
++
++static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms,
+                 const char *oem_id, const char *oem_table_id)
+ {
++    MachineState *ms = MACHINE(vms);
+     MachineClass *mc = MACHINE_GET_CLASS(ms);
+     GQueue *list = g_queue_new();
+     guint pptt_start = table_data->len;
+@@ -143,12 +634,22 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+     guint length, i;
+     int uid = 0;
+     int socket;
+-    AcpiTable table = { .sig = "PPTT", .rev = 2,
++    AcpiTable table = { .sig = "PPTT", .rev = 3,
+                         .oem_id = oem_id, .oem_table_id = oem_table_id };
+     bool unified_l1 = cpu_l1_cache_unified(0);
+ 
+     acpi_table_begin(&table, table_data);
+ 
++    if (vms->auto_topology && vms->nr_vcpu_pinning > 0) {
++        build_pptt_auto_topology(table_data, vms, pptt_start, unified_l1);
++        cache_id_counter = 0;
++        update_vcpu_clidr(vms);
++        g_queue_free(list);
++        acpi_table_end(linker, &table);
++        return;
++    }
++
++    /* Default PPTT build path (no auto-topology) */
+     for (socket = 0; socket < ms->smp.sockets; socket++) {
+         uint32_t l3_cache_offset = table_data->len - pptt_start;
+         build_cache_hierarchy_node(table_data, 0, ARM_L3_CACHE);
+@@ -234,6 +735,7 @@ static void build_pptt_arm(GArray *table_data, BIOSLinker *linker, MachineState
+         }
+     }
+ 
++    cache_id_counter = 0;
+     g_queue_free(list);
+     acpi_table_end(linker, &table);
+ }
+@@ -1493,7 +1995,7 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
+ 
+     if (!vmc->no_cpu_topology) {
+         acpi_add_table(table_offsets, tables_blob);
+-        build_pptt_arm(tables_blob, tables->linker, ms,
++        build_pptt_arm(tables_blob, tables->linker, vms,
+                    vms->oem_id, vms->oem_table_id);
+     }
+ 
+@@ -1703,4 +2205,4 @@ void virt_acpi_setup(VirtMachineState *vms)
+      * in build_state.
+      */
+     acpi_build_tables_cleanup(&tables, false);
+-}
++}
+\ No newline at end of file
+-- 
+2.43.0
+

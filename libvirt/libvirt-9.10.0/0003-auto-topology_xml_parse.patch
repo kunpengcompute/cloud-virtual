@@ -1,0 +1,338 @@
+From 36c93226c4c4ecf709de5f928314d53f9f1b6907 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt@live.cn>
+Date: Tue, 4 Aug 2026 15:29:51 +0800
+Subject: [PATCH 3/3] =?UTF-8?q?auto-topology=20xml=20=E8=A7=A3=E6=9E=90?=
+ =?UTF-8?q?=E4=BF=AE=E6=94=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/conf/cpu_conf.c              | 103 +++++++++++++++++++------------
+ src/conf/cpu_conf.h              |   8 ++-
+ src/conf/domain_conf.c           |   2 +-
+ src/conf/schemas/cputypes.rng    |  52 ++++++++--------
+ src/qemu/qemu_domain.c           |   6 +-
+ src/qemu/qemu_migration_cookie.c |   2 +-
+ tests/cputest.c                  |   4 +-
+ 7 files changed, 106 insertions(+), 71 deletions(-)
+
+diff --git a/src/conf/cpu_conf.c b/src/conf/cpu_conf.c
+index 54e196a085..b8784d174c 100644
+--- a/src/conf/cpu_conf.c
++++ b/src/conf/cpu_conf.c
+@@ -26,6 +26,7 @@
+ #include "virbuffer.h"
+ #include "virfile.h"
+ #include "cpu_conf.h"
++#include "domain_conf.h"
+ #include "virstring.h"
+ #include "virlog.h"
+ 
+@@ -299,7 +300,7 @@ virCPUDefParseXMLString(const char *xml,
+     if (!(doc = virXMLParseStringCtxt(xml, _("(CPU_definition)"), &ctxt)))
+         return -1;
+ 
+-    if (virCPUDefParseXML(ctxt, NULL, type, cpu, validateXML) < 0)
++    if (virCPUDefParseXML(ctxt, NULL, type, cpu, validateXML, NULL, 0) < 0)
+         return -1;
+ 
+     return 0;
+@@ -351,7 +352,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+                   const char *xpath,
+                   virCPUType type,
+                   virCPUDef **cpu,
+-                  bool validateXML)
++                  bool validateXML,
++                  virDomainVcpuDef **vcpus,
++                  size_t maxvcpus)
+ {
+     g_autoptr(virCPUDef) def = NULL;
+     g_autofree xmlNodePtr *nodes = NULL;
+@@ -573,46 +576,70 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+             }
+         }
+ 
+-        if (def->auto_topology) {
+-            /* auto_topology conflicts with explicit socket/dies/clusters/
+-             * cores/threads configuration, they must not be present. */
+-            if (virXMLPropString(topology, "sockets") ||
+-                virXMLPropString(topology, "dies") ||
+-                virXMLPropString(topology, "clusters") ||
+-                virXMLPropString(topology, "cores") ||
+-                virXMLPropString(topology, "threads")) {
+-                virReportError(VIR_ERR_XML_ERROR, "%s",
+-                               _("auto_topology conflicts with explicit socket/dies/clusters/cores/threads configuration"));
+-                return -1;
+-            }
+-        } else {
+-            if (virXMLPropUInt(topology, "sockets", 10,
+-                               VIR_XML_PROP_REQUIRED | VIR_XML_PROP_NONZERO,
+-                               &def->sockets) < 0) {
+-                return -1;
+-            }
++        /* Parse explicit topology attributes regardless of auto_topology */
++        if (virXMLPropUInt(topology, "sockets", 10,
++                           VIR_XML_PROP_NONZERO, &def->sockets) < 0)
++            return -1;
+ 
+-            if (virXMLPropUIntDefault(topology, "dies", 10,
+-                                      VIR_XML_PROP_NONZERO,
+-                                      &def->dies, 1) < 0) {
+-                return -1;
+-            }
++        if (virXMLPropUIntDefault(topology, "dies", 10,
++                                  VIR_XML_PROP_NONZERO,
++                                  &def->dies, 1) < 0)
++            return -1;
+ 
+-            if (virXMLPropUIntDefault(topology, "clusters", 10,
+-                                      VIR_XML_PROP_NONZERO,
+-                                      &def->clusters, 1) < 0) {
+-                return -1;
+-            }
++        if (virXMLPropUIntDefault(topology, "clusters", 10,
++                                  VIR_XML_PROP_NONZERO,
++                                  &def->clusters, 1) < 0)
++            return -1;
+ 
+-            if (virXMLPropUInt(topology, "cores", 10,
+-                               VIR_XML_PROP_REQUIRED | VIR_XML_PROP_NONZERO,
+-                               &def->cores) < 0) {
+-                return -1;
++        if (virXMLPropUInt(topology, "cores", 10,
++                           VIR_XML_PROP_NONZERO, &def->cores) < 0)
++            return -1;
++
++        if (virXMLPropUInt(topology, "threads", 10,
++                           VIR_XML_PROP_NONZERO, &def->threads) < 0)
++            return -1;
++
++        /* auto_topology degradation check */
++        if (def->auto_topology) {
++            bool pinned = true;
++
++            if (vcpus && maxvcpus > 0) {
++                for (size_t j = 0; j < maxvcpus; j++) {
++                    if (!vcpus[j]->cpumask ||
++                        virBitmapCountBits(vcpus[j]->cpumask) != 1) {
++                        pinned = false;
++                        break;
++                    }
++                }
++            } else {
++                /* No vcpu info available, cannot verify pinning */
++                pinned = false;
+             }
+ 
+-            if (virXMLPropUInt(topology, "threads", 10,
+-                               VIR_XML_PROP_REQUIRED | VIR_XML_PROP_NONZERO,
+-                               &def->threads) < 0) {
++            if (!pinned) {
++                VIR_WARN("auto_topology='yes' but cputune condition not met: "
++                         "not every vcpu has exactly one pinned pcpu. "
++                         "Falling back to explicit topology configuration.");
++                def->auto_topology = false;
++
++                if (!def->sockets || !def->cores || !def->threads) {
++                    if (maxvcpus > 0) {
++                        /* No explicit topology fallback, use libvirt defaults */
++                        def->sockets = 1;
++                        def->dies = 1;
++                        def->clusters = 1;
++                        def->cores = maxvcpus;
++                        def->threads = 1;
++                    }
++                    /* else: no vcpu info available, leave topology unspecified */
++                }
++            }
++        } else {
++            /* Non-auto_topology mode, explicit topology is required */
++            if (!def->sockets || !def->cores || !def->threads) {
++                virReportError(VIR_ERR_XML_ERROR, "%s",
++                               _("topology sockets, cores, and threads must be specified "
++                                 "when auto_topology is not 'yes'"));
+                 return -1;
+             }
+         }
+@@ -1248,7 +1275,7 @@ virCPUDefListParse(const char **xmlCPUs,
+         if (!(doc = virXMLParseStringCtxt(xmlCPUs[i], _("(CPU_definition)"), &ctxt)))
+             goto error;
+ 
+-        if (virCPUDefParseXML(ctxt, NULL, cpuType, &cpus[i], false) < 0)
++        if (virCPUDefParseXML(ctxt, NULL, cpuType, &cpus[i], false, NULL, 0) < 0)
+             goto error;
+     }
+ 
+diff --git a/src/conf/cpu_conf.h b/src/conf/cpu_conf.h
+index 3c341b1bea..87b5bdbad1 100644
+--- a/src/conf/cpu_conf.h
++++ b/src/conf/cpu_conf.h
+@@ -27,6 +27,10 @@
+ #include "virenum.h"
+ #include "virhostcpu.h"
+ 
++/* Forward declaration to avoid circular include */
++struct _virDomainVcpuDef;
++typedef struct _virDomainVcpuDef virDomainVcpuDef;
++
+ #define VIR_CPU_VENDOR_ID_LENGTH 12
+ 
+ typedef enum {
+@@ -222,7 +226,9 @@ virCPUDefParseXML(xmlXPathContextPtr ctxt,
+                   const char *xpath,
+                   virCPUType mode,
+                   virCPUDef **cpu,
+-                  bool validateXML);
++                  bool validateXML,
++                  virDomainVcpuDef **vcpus,
++                  size_t maxvcpus);
+ 
+ bool
+ virCPUDefIsEqual(virCPUDef *src,
+diff --git a/src/conf/domain_conf.c b/src/conf/domain_conf.c
+index c791dcf160..d9820acb06 100644
+--- a/src/conf/domain_conf.c
++++ b/src/conf/domain_conf.c
+@@ -19265,7 +19265,7 @@ virDomainDefParseXML(xmlXPathContextPtr ctxt,
+         return NULL;
+ 
+     if (virCPUDefParseXML(ctxt, "./cpu[1]", VIR_CPU_TYPE_GUEST, &def->cpu,
+-                          false) < 0)
++                          false, def->vcpus, def->maxvcpus) < 0)
+         return NULL;
+ 
+     if (virDomainNumaDefParseXML(def->numa, ctxt) < 0)
+diff --git a/src/conf/schemas/cputypes.rng b/src/conf/schemas/cputypes.rng
+index 3b6c3a54fb..fdc7dd7bfa 100644
+--- a/src/conf/schemas/cputypes.rng
++++ b/src/conf/schemas/cputypes.rng
+@@ -84,34 +84,36 @@
+ 
+   <define name="cpuTopology">
+     <element name="topology">
+-      <choice>
+-        <!-- auto_topology derives the topology from vcpu pinning and
+-             conflicts with explicit socket/dies/clusters/cores/threads -->
++      <optional>
+         <attribute name="auto_topology">
+           <ref name="virYesNo"/>
+         </attribute>
+-        <group>
+-          <attribute name="sockets">
+-            <ref name="positiveInteger"/>
+-          </attribute>
+-          <optional>
+-            <attribute name="dies">
+-              <ref name="positiveInteger"/>
+-            </attribute>
+-          </optional>
+-          <optional>
+-            <attribute name="clusters">
+-              <ref name="positiveInteger"/>
+-            </attribute>
+-          </optional>
+-          <attribute name="cores">
+-            <ref name="positiveInteger"/>
+-          </attribute>
+-          <attribute name="threads">
+-            <ref name="positiveInteger"/>
+-          </attribute>
+-        </group>
+-      </choice>
++      </optional>
++      <optional>
++        <attribute name="sockets">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="dies">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="clusters">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="cores">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
++      <optional>
++        <attribute name="threads">
++          <ref name="positiveInteger"/>
++        </attribute>
++      </optional>
+     </element>
+   </define>
+ 
+diff --git a/src/qemu/qemu_domain.c b/src/qemu/qemu_domain.c
+index 25aa24462f..b2d6dd48eb 100644
+--- a/src/qemu/qemu_domain.c
++++ b/src/qemu/qemu_domain.c
+@@ -3378,7 +3378,7 @@ qemuDomainObjPrivateXMLParse(xmlXPathContextPtr ctxt,
+     qemuDomainSetPrivatePathsOld(driver, vm);
+ 
+     if (virCPUDefParseXML(ctxt, "./cpu", VIR_CPU_TYPE_GUEST, &priv->origCPU,
+-                          false) < 0)
++                          false, NULL, 0) < 0)
+         return -1;
+ 
+     priv->chardevStdioLogd = virXPathBoolean("boolean(./chardevStdioLogd)",
+@@ -10867,7 +10867,7 @@ qemuDomainSaveCookieParse(xmlXPathContextPtr ctxt G_GNUC_UNUSED,
+         return -1;
+ 
+     if (virCPUDefParseXML(ctxt, "./cpu[1]", VIR_CPU_TYPE_GUEST,
+-                          &cookie->cpu, false) < 0)
++                          &cookie->cpu, false, NULL, 0) < 0)
+         return -1;
+ 
+     cookie->slirpHelper = virXPathBoolean("boolean(./slirpHelper)", ctxt) > 0;
+@@ -12828,4 +12828,4 @@ qemuDomainGetUBPortNumByEid(const virDomainDef *def, unsigned int eid)
+         return info->udevPort.num;
+ 
+     return -1;
+-}
++}
+\ No newline at end of file
+diff --git a/src/qemu/qemu_migration_cookie.c b/src/qemu/qemu_migration_cookie.c
+index 5505fdaf22..4581b5ffea 100644
+--- a/src/qemu/qemu_migration_cookie.c
++++ b/src/qemu/qemu_migration_cookie.c
+@@ -1389,7 +1389,7 @@ qemuMigrationCookieXMLParse(qemuMigrationCookie *mig,
+ 
+     if (flags & QEMU_MIGRATION_COOKIE_CPU &&
+         virCPUDefParseXML(ctxt, "./cpu[1]", VIR_CPU_TYPE_GUEST, &mig->cpu,
+-                          false) < 0)
++                          false, NULL, 0) < 0)
+         return -1;
+ 
+     if (flags & QEMU_MIGRATION_COOKIE_CAPS &&
+diff --git a/tests/cputest.c b/tests/cputest.c
+index b3253e3116..3efa9b3eb6 100644
+--- a/tests/cputest.c
++++ b/tests/cputest.c
+@@ -81,7 +81,7 @@ cpuTestLoadXML(virArch arch, const char *name)
+     if (!(doc = virXMLParseFileCtxt(xml, &ctxt)))
+         return NULL;
+ 
+-    virCPUDefParseXML(ctxt, NULL, VIR_CPU_TYPE_AUTO, &cpu, false);
++    virCPUDefParseXML(ctxt, NULL, VIR_CPU_TYPE_AUTO, &cpu, false, NULL, 0);
+ 
+     return cpu;
+ }
+@@ -117,7 +117,7 @@ cpuTestLoadMultiXML(virArch arch,
+     for (i = 0; i < n; i++) {
+         ctxt->node = nodes[i];
+         if (virCPUDefParseXML(ctxt, NULL, VIR_CPU_TYPE_HOST, &cpus[i],
+-                              false) < 0)
++                              false, NULL, 0) < 0)
+             goto error;
+     }
+ 
+-- 
+2.43.0
+
