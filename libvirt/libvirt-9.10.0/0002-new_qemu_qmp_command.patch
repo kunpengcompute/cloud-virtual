@@ -1,0 +1,298 @@
+From 2b889dec12fcddd982128a9ad5342fe21e28f087 Mon Sep 17 00:00:00 2001
+From: chxyt11 <chxyt@live.cn>
+Date: Mon, 20 Jul 2026 17:23:17 +0800
+Subject: [PATCH 2/3] =?UTF-8?q?=E6=96=B0=E5=A2=9E=E5=90=8C=E6=AD=A5?=
+ =?UTF-8?q?=E7=BB=91=E6=A0=B8=E4=BF=A1=E6=81=AF=E5=88=B0qemu?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/qemu/qemu_capabilities.c |  3 ++
+ src/qemu/qemu_capabilities.h |  2 +
+ src/qemu/qemu_monitor.c      | 14 ++++++
+ src/qemu/qemu_monitor.h      | 11 +++++
+ src/qemu/qemu_monitor_json.c | 45 +++++++++++++++++
+ src/qemu/qemu_monitor_json.h |  6 +++
+ src/qemu/qemu_process.c      | 94 ++++++++++++++++++++++++++++++++++++
+ src/vbox/vbox_common.c       |  1 +
+ 8 files changed, 176 insertions(+)
+
+diff --git a/src/qemu/qemu_capabilities.c b/src/qemu/qemu_capabilities.c
+index 4ac491ce2b..c5043b1535 100644
+--- a/src/qemu/qemu_capabilities.c
++++ b/src/qemu/qemu_capabilities.c
+@@ -719,6 +719,8 @@ VIR_ENUM_IMPL(virQEMUCaps,
+ 
+               /* 475 */
+               "machine.virt.highmem-mmio-size", /* QEMU_CAPS_MACHINE_VIRT_HIGHMEM_MMIO_SIZE */
++
++              "set-vcpu-pinning", /* QEMU_CAPS_SET_VCPU_PINNING */
+     );
+ 
+ 
+@@ -1248,6 +1250,7 @@ struct virQEMUCapsStringFlags virQEMUCapsCommands[] = {
+     { "calc-dirty-rate", QEMU_CAPS_CALC_DIRTY_RATE },
+     { "query-stats", QEMU_CAPS_QUERY_STATS },
+     { "query-stats-schemas", QEMU_CAPS_QUERY_STATS_SCHEMAS },
++    { "set-vcpu-pinning", QEMU_CAPS_SET_VCPU_PINNING },
+ };
+ 
+ struct virQEMUCapsStringFlags virQEMUCapsMigration[] = {
+diff --git a/src/qemu/qemu_capabilities.h b/src/qemu/qemu_capabilities.h
+index e37528d6a0..07561d1090 100644
+--- a/src/qemu/qemu_capabilities.h
++++ b/src/qemu/qemu_capabilities.h
+@@ -699,6 +699,8 @@ typedef enum { /* virQEMUCapsFlags grouping marker for syntax-check */
+     /* 475 */
+     QEMU_CAPS_MACHINE_VIRT_HIGHMEM_MMIO_SIZE, /* -machine virt,highmem-mmio-size=<size> */
+ 
++    QEMU_CAPS_SET_VCPU_PINNING, /* set-vcpu-pinning QMP command */
++
+     QEMU_CAPS_LAST /* this must always be the last item */
+ } virQEMUCapsFlags;
+ 
+diff --git a/src/qemu/qemu_monitor.c b/src/qemu/qemu_monitor.c
+index c114c50cc7..5363b8bcc6 100644
+--- a/src/qemu/qemu_monitor.c
++++ b/src/qemu/qemu_monitor.c
+@@ -2147,6 +2147,20 @@ qemuMonitorSetBalloon(qemuMonitor *mon,
+ }
+ 
+ 
++int
++qemuMonitorSetVcpuPinning(qemuMonitor *mon,
++                          bool auto_topology,
++                          qemuMonitorVcpuPinning *pinning,
++                          size_t npinning)
++{
++    VIR_DEBUG("auto_topology=%d, npinning=%zu", auto_topology, npinning);
++
++    QEMU_CHECK_MONITOR(mon);
++
++    return qemuMonitorJSONSetVcpuPinning(mon, auto_topology, pinning, npinning);
++}
++
++
+ int
+ qemuMonitorSaveVirtualMemory(qemuMonitor *mon,
+                              unsigned long long offset,
+diff --git a/src/qemu/qemu_monitor.h b/src/qemu/qemu_monitor.h
+index 3ab9ccd56e..03cae802e6 100644
+--- a/src/qemu/qemu_monitor.h
++++ b/src/qemu/qemu_monitor.h
+@@ -751,6 +751,17 @@ int qemuMonitorExpirePassword(qemuMonitor *mon,
+ int qemuMonitorSetBalloon(qemuMonitor *mon,
+                           unsigned long long newmem);
+ 
++typedef struct _qemuMonitorVcpuPinning qemuMonitorVcpuPinning;
++struct _qemuMonitorVcpuPinning {
++    unsigned int vcpu_id;
++    unsigned int pcpu_id;
++};
++
++int qemuMonitorSetVcpuPinning(qemuMonitor *mon,
++                              bool auto_topology,
++                              qemuMonitorVcpuPinning *pinning,
++                              size_t npinning);
++
+ int qemuMonitorSaveVirtualMemory(qemuMonitor *mon,
+                                  unsigned long long offset,
+                                  unsigned long long length,
+diff --git a/src/qemu/qemu_monitor_json.c b/src/qemu/qemu_monitor_json.c
+index 8f0e36e515..5cd0de102f 100644
+--- a/src/qemu/qemu_monitor_json.c
++++ b/src/qemu/qemu_monitor_json.c
+@@ -2843,6 +2843,51 @@ qemuMonitorJSONSetBalloon(qemuMonitor *mon,
+ }
+ 
+ 
++int
++qemuMonitorJSONSetVcpuPinning(qemuMonitor *mon,
++                              bool auto_topology,
++                              qemuMonitorVcpuPinning *pinning,
++                              size_t npinning)
++{
++    g_autoptr(virJSONValue) cmd = NULL;
++    g_autoptr(virJSONValue) reply = NULL;
++    g_autoptr(virJSONValue) vcpu_pinning = NULL;
++    size_t i;
++
++    vcpu_pinning = virJSONValueNewArray();
++
++    for (i = 0; i < npinning; i++) {
++        g_autoptr(virJSONValue) entry = virJSONValueNewObject();
++
++        if (virJSONValueObjectAppendNumberInt(entry, "vcpu-id",
++                                              pinning[i].vcpu_id) < 0)
++            return -1;
++
++        if (virJSONValueObjectAppendNumberInt(entry, "pcpu-id",
++                                              pinning[i].pcpu_id) < 0)
++            return -1;
++
++        if (virJSONValueArrayAppend(vcpu_pinning, &entry) < 0)
++            return -1;
++    }
++
++    cmd = qemuMonitorJSONMakeCommand("set-vcpu-pinning",
++                                     "b:auto-topology", auto_topology,
++                                     "a:vcpu-pinning", &vcpu_pinning,
++                                     NULL);
++    if (!cmd)
++        return -1;
++
++    if (qemuMonitorJSONCommand(mon, cmd, &reply) < 0)
++        return -1;
++
++    if (qemuMonitorJSONCheckError(cmd, reply) < 0)
++        return -1;
++
++    return 0;
++}
++
++
+ static int qemuMonitorJSONSaveMemory(qemuMonitor *mon,
+                                      const char *cmdtype,
+                                      unsigned long long offset,
+diff --git a/src/qemu/qemu_monitor_json.h b/src/qemu/qemu_monitor_json.h
+index 962bf77374..e341eac247 100644
+--- a/src/qemu/qemu_monitor_json.h
++++ b/src/qemu/qemu_monitor_json.h
+@@ -126,6 +126,12 @@ int
+ qemuMonitorJSONSetBalloon(qemuMonitor *mon,
+                           unsigned long long newmem);
+ 
++int
++qemuMonitorJSONSetVcpuPinning(qemuMonitor *mon,
++                              bool auto_topology,
++                              qemuMonitorVcpuPinning *pinning,
++                              size_t npinning);
++
+ int
+ qemuMonitorJSONSaveVirtualMemory(qemuMonitor *mon,
+                                  unsigned long long offset,
+diff --git a/src/qemu/qemu_process.c b/src/qemu/qemu_process.c
+index 1c6acb40b0..981b78b4de 100644
+--- a/src/qemu/qemu_process.c
++++ b/src/qemu/qemu_process.c
+@@ -5483,6 +5483,96 @@ qemuProcessSetupRawIO(virDomainObj *vm,
+ }
+ 
+ 
++/*
++ * qemuProcessSetVcpuPinning:
++ * @vm: domain object
++ * @asyncJob: asynchronous job
++ *
++ * Send the vcpu-to-pcpu pinning information to qemu via the
++ * set-vcpu-pinning QMP command. This must be called before vcpu
++ * threads are created so that qemu can build the PPTT table
++ * according to the host pcpu topology.
++ *
++ * Returns 0 on success, -1 on error.
++ */
++static int
++qemuProcessSetVcpuPinning(virDomainObj *vm,
++                          virDomainAsyncJob asyncJob)
++{
++    qemuDomainObjPrivate *priv = vm->privateData;
++    g_autofree qemuMonitorVcpuPinning *pinning = NULL;
++    size_t npinning = 0;
++    size_t maxvcpus;
++    size_t i;
++    int ret = -1;
++
++    /* Only send the pinning info when auto_topology is requested. */
++    if (!vm->def->cpu || !vm->def->cpu->auto_topology)
++        return 0;
++
++    if (!virQEMUCapsGet(priv->qemuCaps, QEMU_CAPS_SET_VCPU_PINNING)) {
++        virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
++                       _("set-vcpu-pinning QMP command is not supported by qemu"));
++        return -1;
++    }
++
++    maxvcpus = virDomainDefGetVcpusMax(vm->def);
++    pinning = g_new0(qemuMonitorVcpuPinning, maxvcpus);
++
++    for (i = 0; i < maxvcpus; i++) {
++        virDomainVcpuDef *vcpu = virDomainDefGetVcpu(vm->def, i);
++        ssize_t pcpu;
++
++        if (!vcpu || !vcpu->online)
++            continue;
++
++        if (!vcpu->cpumask) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
++                           _("vcpu %1$zu has no cpuset configured, "
++                             "which is required for auto_topology"),
++                           i);
++            return -1;
++        }
++
++        /* auto_topology requires a single pcpu per vcpu so that qemu
++         * can derive the virtual CCL/socket topology from the host
++         * pcpu topology. */
++        pcpu = virBitmapNextSetBit(vcpu->cpumask, -1);
++        if (pcpu < 0) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
++                           _("vcpu %1$zu has empty cpuset"), i);
++            return -1;
++        }
++
++        if (virBitmapNextSetBit(vcpu->cpumask, pcpu) >= 0) {
++            virReportError(VIR_ERR_CONFIG_UNSUPPORTED,
++                           _("vcpu %1$zu cpuset must contain exactly "
++                             "one pcpu for auto_topology"), i);
++            return -1;
++        }
++
++        pinning[npinning].vcpu_id = i;
++        pinning[npinning].pcpu_id = pcpu;
++        npinning++;
++    }
++
++    if (npinning == 0)
++        return 0;
++
++    if (qemuDomainObjEnterMonitorAsync(vm, asyncJob) < 0)
++        return -1;
++
++    if (qemuMonitorSetVcpuPinning(priv->mon, true, pinning, npinning) < 0)
++        goto cleanup;
++
++    ret = 0;
++
++ cleanup:
++    qemuDomainObjExitMonitor(vm);
++    return ret;
++}
++
++
+ static int
+ qemuProcessSetupBalloon(virDomainObj *vm,
+                         virDomainAsyncJob asyncJob)
+@@ -8164,6 +8254,10 @@ qemuProcessLaunch(virConnectPtr conn,
+     if (qemuConnectAgent(driver, vm) < 0)
+         goto cleanup;
+ 
++    VIR_DEBUG("Setting vcpu pinning for flexible CCL topology");
++    if (qemuProcessSetVcpuPinning(vm, asyncJob) < 0)
++        goto cleanup;
++
+     VIR_DEBUG("setting up hotpluggable cpus");
+     if (qemuDomainHasHotpluggableStartupVcpus(vm->def)) {
+         if (qemuDomainRefreshVcpuInfo(vm, asyncJob, false) < 0)
+diff --git a/src/vbox/vbox_common.c b/src/vbox/vbox_common.c
+index de3c9989a5..8ce154a326 100644
+--- a/src/vbox/vbox_common.c
++++ b/src/vbox/vbox_common.c
+@@ -7937,3 +7937,4 @@ virHypervisorDriver *vboxGetHypervisorDriver(uint32_t uVersion)
+ 
+     return &vboxCommonDriver;
+ }
++
+-- 
+2.43.0
+
