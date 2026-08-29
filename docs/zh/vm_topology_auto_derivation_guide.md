@@ -1,4 +1,4 @@
-# 虚拟机拓扑灵活自动推导特性
+# 虚拟机灵活推导拓扑特性指南
 
 ## 特性描述
 
@@ -13,13 +13,10 @@
 - 应用限制
     - 安装的libvirt和qemu可能替换系统版本，可能造成其他用户或者虚拟机的异常。
     - 补丁基于openEuler社区版本，使用其他版本的qemu或libvirt可能导致异常，需要用户根据实际情况进行评估。
-
-#### 应用限制
-
-- 本特性仅适用于ARM架构（aarch64）平台。
-- 本特性要求qemu基于openEuler社区qemu v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
-- 当**auto_topology='yes'**且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
-- auto_topology启用时，vCPU可能被分配在不同的NUMA（Non-Uniform Memory Access，非统一内存访问）节点上，需要用户按照实际的NUMA节点配置合适的内存绑定节点信息，且内存绑定规则需符合真实硬件结构。
+    - 本特性仅适用于ARM架构（aarch64）平台。
+    - 本特性要求qemu基于openEuler社区qemu v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
+    - 当**auto_topology='yes'**且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
+    - auto_topology启用时，vCPU可能被分配在不同的NUMA（Non-Uniform Memory Access，非统一内存访问）节点上，需要用户按照实际的NUMA节点配置合适的内存绑定节点信息，且内存绑定规则需符合真实硬件结构。
 
 #### 与其他特性的交互
 
@@ -138,7 +135,7 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 | 项目 | 要求 |
 | ---- | ---- |
-| 处理器 | 鲲鹏920、950系列处理器（本文以鲲鹏950处理器为例） |
+| 处理器 | 鲲鹏920新型号处理器或鲲鹏950处理器（本文以鲲鹏950处理器为例） |
 
 **软件要求**
 
@@ -164,7 +161,7 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需要完成vCPU绑核配置、自动拓扑配置和NUMA内存绑定配置。
 
-**配置vCPU绑核信息**
+**配置vCPU绑核信息和numa绑定信息**
 
 用户需要配置vCPU的绑核信息，以下为8C虚拟机的xml配置示例：
 
@@ -181,15 +178,12 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
     <vcpupin vcpu='6' cpuset='18'/>
     <vcpupin vcpu='7' cpuset='19'/>
   </cputune>
-  <numatune>
-    <memory mode='strict' nodeset='0'/>
-  </numatune>
 </domain>
 ```
 
 **配置自动拓扑**
 
-同时在xml的`<cpu>`小节中写入自动拓扑配置：
+同时在xml的`<cpu>`小节中写入自动拓扑配置，需要同步配置numa的拓扑信息：
 
 ```xml
 <domain>
@@ -211,7 +205,7 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
 
 **配置NUMA内存绑定**
 
-auto_topology启用时，按照绑核的配置，vCPU可能会分配在不同的NUMA节点上。此时需要用户按照实际的NUMA节点去配置合适的内存绑定节点信息。
+auto_topology启用时，按照绑核的配置，需要用户按照实际的NUMA节点去配置合适的内存绑定节点信息。
 
 | vCPU id | vccl | vsocket | pCPU id | ccl id | socket id |
 |---------|------|---------|---------|--------|-----------|
@@ -224,13 +218,12 @@ auto_topology启用时，按照绑核的配置，vCPU可能会分配在不同的
 <domain>
   ……
   <numatune>
-    <memory cellid='0' mode='strict' nodeset='0'/>
-    <memory cellid='1' mode='strict' nodeset='1'/>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
+    <memnode cellid='1' mode='strict' nodeset='1'/>
   </numatune>
 
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
-
     <numa>
         <cell id='0' cpus='0-15' memory='24' unit='GiB'/>
         <cell id='1' cpus='16-31' memory='24' unit='GiB'/>
@@ -305,6 +298,15 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 | vcpu-pinning[].vcpu-id | int | 是 | 虚拟cpu编号，从0开始。 |
 | vcpu-pinning[].pcpu-id | int | 是 | 绑定的物理cpu编号。 |
 
+### 调度域说明
+
+虚拟机调度域按 core、CCL、NUMA、整机四个层级构建：                                                                                                                                                   
+
+1. core 调度域：当服务器开启超线程时，同一物理核下的两个超线程构成 core 调度域，调度仅发生在这两个超线程之间。
+2. CCL 调度域：以 L3 缓存为基本单位，范围随服务器类型而不同。鲲鹏 920 新型号处理器上一个 NUMA 共享一个 L3 缓存，CCL 调度域范围即 NUMA；鲲鹏 950处理器上一个 cluster 共享一个 L3 缓存，CCL 调度域范围即 cluster。
+3. NUMA 调度域：由虚拟机 XML 文件指定。注意此处的 NUMA 并非物理机上的 NUMA，而是 XML 中为虚拟机绑定的 NUMA——若在 XML 中绑定了 NUMA 范围，则会在每个NUMA 范围内生成对应层级的调度域。
+4. 整机调度域：覆盖虚拟机绑定的全部 vCPU，为最高层级调度域。 
+
 ### 使用效果
 
 以下为两个典型应用场景的完整配置示例及效果。
@@ -351,16 +353,35 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='27' cpuset='31'/>
   </cputune>
   <numatune>
-    <memory mode='strict' nodeset='0'/>
+    <memnode='0' mode='strict' nodeset='0'/>
   </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
+    <numa>
+      <cell id='0' cpus='0-27' memory='8' unit='GiB'/>
+    </numa>
   </cpu>
   ……
 </domain>
 ```
 
-在鲲鹏950处理器上启动虚拟机时，虚拟机vCPU0-11会在一个CCL中，cpu12-27会在另一个CCL中，OS可以正确划分调度域，在多线程任务中可以减少跨CCL调度。
+鲲鹏 950 处理器（CCL = cluster）上启动时，预期有 core、CCL、NUMA、整机四层调度域：
+                                                
+1. core 域：只有当同一物理核下的两个超线程被绑定给一对 vCPU 时，这两个 vCPU 之间才会形成 core 调度域——如 vCPU 0-1 对应同一物理核的两个超线程、vCPU2-3 对应下一个物理核的两个超线程，以此类推，调度仅发生在这对超线程之间；若两个 vCPU 绑定在不同的物理核上，即使编号相邻也不会形成 core 调度域。       
+2. CCL 域：950 的 CCL 即 cluster（一个 cluster 共享一个 L3 缓存），划分跟随物理 L3 边界——vCPU 0-11 属于一个 CCL，vCPU 12-27 属于另一个 CCL。
+3. NUMA 域：由虚拟机 XML 文件中绑定的 NUMA（guest cell）决定，而非物理机 NUMA——本例 XML 只定义了一个 cell（cpus='0-27'），因此虚机 NUMA 域覆盖全部vCPU 0-27，与被物理 L3 切成两段的 CCL 域边界并不重合。
+4. 整机域：覆盖全部 vCPU 0-27。                                                                                          
+
+由于虚机 NUMA 域与整机域范围完全重复，NUMA 域被折叠，实际呈现 3 层调度域：core、CCL、整机。
+
+鲲鹏 920 新型号处理器（CCL = NUMA）上启动时，预期同样有四层调度域：
+
+1. core 域：形成条件同 950——仅存在于同一物理核下两个超线程对应的 vCPU 之间。
+2. CCL 域：920 的 CCL 即 NUMA（一个 NUMA 共享一个 L3 缓存），全部 vCPU 0-27 落在同一 L3/NUMA 范围内，因此 CCL 域覆盖全部 vCPU。
+3. NUMA 域：同样由 XML 中绑定的 guest cell 决定（非物理机 NUMA），本例单 cell 覆盖 vCPU 0-27。
+4. 整机域：覆盖全部 vCPU 0-27。
+
+由于 CCL 域、NUMA 域与整机域范围完全重复，三者合并为一层，实际呈现 2 层调度域：core、整机。
 
 **场景二：利用零散剩余处理器创建大规格虚拟机**
 
@@ -386,11 +407,37 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='14' cpuset='242'/>
     <vcpupin vcpu='15' cpuset='243'/>
   </cputune>
+  <numatune>
+    <memnode='0' mode='strict' nodeset='0'/>
+    <memnode='1' mode='strict' nodeset='1'/>
+    <memnode='2' mode='strict' nodeset='2'/>
+  </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
+    <numa>
+      <cell id='0' cpus='0-4' memory='2' unit='GiB'/>
+      <cell id='1' cpus='5-8' memory='2' unit='GiB'/>
+      <cell id='2' cpus='9-15' memory='4' unit='GiB'/>
+    </numa>
   </cpu>
   ……
 </domain>
 ```
 
-上述例子中cpu分布在不同的cluster、numa node中，且数量不一致，自动拓扑推导可以将物理cpu在同一CCL上的vCPU也分配在同一CCL中。
+鲲鹏 950 处理器（CCL = cluster）上启动时，预期有 core、CCL、NUMA、整机四层调度域：
+
+1. core 域：只有当同一物理核下的两个超线程被绑定给一对 vCPU 时才形成。本例形成配对的是：vCPU 0-1（pCPU 4,5）、vCPU 3-4（pCPU 30,31）、vCPU 5-6（pCPU108,109）、vCPU 9-10（pCPU 200,201）、vCPU 11-12（pCPU 202,203）、vCPU 14-15（pCPU 242,243）；而 vCPU 2、7、8、13 的超线程（pCPU7、111、113、240）未绑定给虚机，因此这 4 个 vCPU 不构成 core 域。 
+2. CCL 域：950 的 CCL 即 cluster（一个 cluster 共享一个 L3 缓存），划分跟随物理 L3 边界——16 个 vCPU 分布在 6 个物理 cluster 上：vCPU 0-2、vCPU3-4、vCPU 5-7、vCPU 8、vCPU 9-12、vCPU 13-15 各属一个 CCL。
+3. NUMA 域：由虚拟机 XML 文件中绑定的 NUMA（guest cell）决定，而非物理机 NUMA——本例定义了 3 个 cell：cell 0（vCPU 0-4）、cell 1（vCPU 5-8）、cell2（vCPU 9-15），生成 3 个 NUMA 域，其边界与物理 CCL 并不重合（如 cell 0 的 vCPU 0-4 横跨两个物理 cluster）。
+4. 整机域：覆盖全部 16 个 vCPU。
+
+四层范围互不重复，无折叠发生，实际呈现 4 层调度域：core、CCL、NUMA、整机。
+
+鲲鹏 920 新型号处理器（CCL = NUMA）上启动时，预期同样有四层调度域：
+
+1. core 域：形成条件与配对情况同 950。
+2. CCL 域：920 的 CCL 即 NUMA（一个 NUMA 共享一个 L3 缓存），vCPU 按物理 NUMA 归属分为 3 段：vCPU 0-4（物理 node 0）、vCPU 5-8（物理 node 1）、vCPU9-15（物理 node 2）。
+3. NUMA 域：同样由 XML 中绑定的 guest cell 决定（非物理机 NUMA），3 个 cell 的覆盖范围与 CCL 域完全一致。
+4. 整机域：覆盖全部 16 个 vCPU。
+
+由于 CCL 域与 NUMA 域范围完全重复，两者合并为一层，实际呈现 3 层调度域：core、CCL（NUMA）、整机。
