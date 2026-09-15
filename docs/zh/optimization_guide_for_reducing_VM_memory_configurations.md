@@ -34,14 +34,32 @@
 
 | 项目 | 版本或说明 |
 |--|--|
-| OS | `openEuler 2403 SP3` |
-| 内核源码基线 | `OLK-6.6 6.6.0-132.0.0` |
-| libvirt | `9.10.0（yum源）` |
-| qemu | `8.2.0（yum源）` |
-| memlink | `1.0.0-214（yum源）`|
-| redis | `6.2.0（自行安装，版本不作限制，文档以6.2.0为例）` |
-| nginx | `1.24.0（自行安装，版本不作限制，文档以1.24.0为例）` |
-| wrk | `4.1.0（自行安装，版本不作限制，文档以4.1.0为例）` |  
+| OS | openEuler 2403 LTS SP3 |
+| 内核源码基线 | OLK-6.6 6.6.0-132.0.0 |
+| libvirt | 9.10.0（yum源） |
+| qemu | 8.2.0（yum源） |
+| memlink | 1.0.0-214（yum源，以memlinkd，即memlink deamon呈现）|
+| redis | 6.2.0（自行安装，版本不作限制，文档以6.2.0为例） |
+| nginx | 1.24.0（自行安装，版本不作限制，文档以1.24.0为例） |
+| wrk | 4.1.0（自行安装，版本不作限制，文档以4.1.0为例） |
+
+## 安装软件
+
+### host软件安装
+
+安装libvirt/qemu相关软件包。
+
+    ```bash
+    yum install -y libvirt qemu edk2-aarch64 memlinkd
+    ```
+
+### 虚拟机软件安装
+
+安装redis、nginx、wrk等相关软件包。
+
+    ```bash
+    yum install -y redis nginx wrk
+    ```
 
 ## 软件编译
 
@@ -127,6 +145,13 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     reboot
     ```
 
+7. 执行以下命令分别检查内核版本信息是否为新安装的内核，以及大页数量是否与配置一致。
+
+    ```bash
+    uname -a
+    cat /proc/meminfo | grep Huge
+    ```
+
 ### 升级Guest内核版本（可选）
 
 使能Guest pagecache回收能力时，需要替换Guest内核到kernel-6.6.0-145.3.27.158.20260826.b7db8e91096e.oe2403sp3.aarch64版本或以上。
@@ -183,24 +208,6 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     ```bash
     cd cloud-virtual/tools/
     gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk -lboundscheck
-    ```
-
-## 安装软件
-
-### host软件安装
-
-安装libvirt/qemu相关软件包。
-
-    ```bash
-    yum install -y libvirt qemu edk2-aarch64 memlinkd
-    ```
-
-### 虚拟机软件安装
-
-安装redis、nginx、wrk等相关软件包。
-
-    ```bash
-    yum install -y redis nginx wrk
     ```
 
 ## 使用特性
