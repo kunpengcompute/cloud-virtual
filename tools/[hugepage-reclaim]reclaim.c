@@ -58,7 +58,7 @@ typedef enum {
 
 typedef struct {
     pid_t pid;
-    unsigned long memory_kb;
+    unsigned long memoryKb;
     char name[128];
 } VMInfo;
 
@@ -66,17 +66,17 @@ typedef struct VMHeatInfo {
     pid_t pid;
     bool alive;
     /* VM总页数 */
-    uint64_t total_pages;
+    uint64_t totalPages;
     /* 当前可回收页 */
-    uint64_t reclaimable_pages;
+    uint64_t reclaimablePages;
     /* 热度值 [0,1] */
-    double heat_score;
+    double heatScore;
     /* 冷度值 [0,1] */
-    double cold_score;
+    double coldScore;
     /* 最近更新时间 */
-    uint64_t last_update_ns;
+    uint64_t lastUpdateNs;
     /* 正在回收计数 */
-    int in_reclaim;
+    int inReclaim;
     pthread_mutex_t lock;
     struct VMHeatInfo *next;
 } VMHeatInfo;
@@ -84,14 +84,14 @@ typedef struct VMHeatInfo {
 typedef struct {
     VMHeatInfo *head;
     pthread_rwlock_t rwlock;
-    uint64_t sample_interval_s;
-    double ema_alpha;
-    int vm_count;
+    uint64_t sampleIntervalS;
+    double emaAlpha;
+    int vmCount;
 } HeatManager;
 
 typedef struct {
     int node;
-    uint64_t reclaim_pages;
+    uint64_t reclaimPages;
     VMHeatInfo *vm;
 } ReclaimTask;
 
@@ -122,7 +122,7 @@ static void VMHeatUpdate(HeatManager *mgr, VMHeatInfo *vm)
 
     now = MonotonicTimeNs();
     pthread_mutex_lock(&vm->lock);
-    deltaNs = now - vm->last_update_ns;
+    deltaNs = now - vm->lastUpdateNs;
 
     if (!deltaNs) {
         pthread_mutex_unlock(&vm->lock);
@@ -143,18 +143,18 @@ static void VMHeatUpdate(HeatManager *mgr, VMHeatInfo *vm)
     /*
      * 采样窗口内被访问过的页面比例
      */
-    currentHeat = vm->total_pages ?
-        (double)accessed / vm->total_pages : 0;
+    currentHeat = vm->totalPages ?
+        (double)accessed / vm->totalPages : 0;
     if (currentHeat > 1.0)
         currentHeat = 1.0;
 
     /*
      * EMA平滑
      */
-    vm->heat_score = EmaUpdate(vm->heat_score, currentHeat, mgr->ema_alpha);
-    vm->cold_score = 1.0 - vm->heat_score;
-    vm->reclaimable_pages = vm->total_pages * vm->cold_score;
-    vm->last_update_ns = now;
+    vm->heatScore = EmaUpdate(vm->heatScore, currentHeat, mgr->emaAlpha);
+    vm->coldScore = 1.0 - vm->heatScore;
+    vm->reclaimablePages = vm->totalPages * vm->coldScore;
+    vm->lastUpdateNs = now;
     pthread_mutex_unlock(&vm->lock);
 }
 
@@ -193,8 +193,8 @@ static uint64_t VMCalculateReclaimPages(VMHeatInfo *vm, PressureLevel pressure)
     pthread_mutex_lock(&vm->lock);
 
     /* 每台虚拟机至少保留20%内存 */
-    reclaimPages = vm->reclaimable_pages * PressureFactor(pressure);
-    maxReclaim = vm->total_pages - vm->total_pages / 5;
+    reclaimPages = vm->reclaimablePages * PressureFactor(pressure);
+    maxReclaim = vm->totalPages - vm->totalPages / 5;
 
     if (reclaimPages > maxReclaim)
         reclaimPages = maxReclaim;
@@ -440,7 +440,7 @@ static void *ReclaimWorker(void *arg)
     ReclaimTask *task = (ReclaimTask *)arg;
     pid_t pid = task->vm->pid;
     int node = task->node;
-    uint64_t reclaimPages = task->reclaim_pages;
+    uint64_t reclaimPages = task->reclaimPages;
 
     char mapsPath[256], numaPath[256];
     if (snprintf_s(mapsPath, sizeof(mapsPath), sizeof(mapsPath) - 1, "/proc/%d/maps", pid) < 0) {
@@ -501,7 +501,7 @@ static void *ReclaimWorker(void *arg)
 
 out:
     pthread_mutex_lock(&task->vm->lock);
-    task->vm->in_reclaim--;
+    task->vm->inReclaim--;
     pthread_mutex_unlock(&task->vm->lock);
     free(task);
     return NULL;
@@ -577,7 +577,7 @@ static int GetVMInfos(VMInfo *vms, int max)
             pid_t pid = ReadPidFromFile(name);
             if (pid > 0) {
                 vms[count].pid = pid;
-                vms[count].memory_kb = info.memory;
+                vms[count].memoryKb = info.memory;
                 if (snprintf_s(vms[count].name, sizeof(vms[count].name), sizeof(vms[count].name) - 1, "%s", name) < 0) {
                     LOG_ERR("snprintf_s failed for vm name %s\n", name);
                     virDomainFree(domains[i]);
@@ -646,15 +646,15 @@ static void HeatManagerSyncVMs(HeatManager *mgr)
         }
         newVm->pid = pid;
         newVm->alive = true;
-        newVm->heat_score = 0.5;
-        newVm->cold_score = 0.5;
-        newVm->total_pages = vmInfos[i].memory_kb / 2048;
-        newVm->reclaimable_pages = newVm->total_pages * newVm->cold_score;
-        newVm->last_update_ns = MonotonicTimeNs();
+        newVm->heatScore = 0.5;
+        newVm->coldScore = 0.5;
+        newVm->totalPages = vmInfos[i].memoryKb / 2048;
+        newVm->reclaimablePages = newVm->totalPages * newVm->coldScore;
+        newVm->lastUpdateNs = MonotonicTimeNs();
         pthread_mutex_init(&newVm->lock, NULL);
         newVm->next = mgr->head;
         mgr->head = newVm;
-        mgr->vm_count++;
+        mgr->vmCount++;
         LOG_INFO("add vm pid=%d\n", pid);
     }
 
@@ -667,7 +667,7 @@ static void HeatManagerSyncVMs(HeatManager *mgr)
     while (vm) {
         if (!vm->alive) {
             pthread_mutex_lock(&vm->lock);
-            int inUse = (vm->in_reclaim > 0);
+            int inUse = (vm->inReclaim > 0);
             pthread_mutex_unlock(&vm->lock);
 
             if (inUse)
@@ -677,7 +677,7 @@ static void HeatManagerSyncVMs(HeatManager *mgr)
             *pprev = vm->next;
             pthread_mutex_destroy(&vm->lock);
             free(vm);
-            mgr->vm_count--;
+            mgr->vmCount--;
             vm = *pprev;
             continue;
         }
@@ -703,7 +703,7 @@ static void *HeatSamplingThread(void *arg)
             vm = vm->next;
         }
         pthread_rwlock_unlock(&mgr->rwlock);
-        sleep(mgr->sample_interval_s);
+        sleep(mgr->sampleIntervalS);
     }
 
     LOG_INFO("heat thread exit\n");
@@ -784,9 +784,9 @@ static void MonitorAndReclaim(HeatManager *mgr)
                 }
 
                 pthread_mutex_lock(&vm->lock);
-                int skip = (vm->cold_score < 0.1);
+                int skip = (vm->coldScore < 0.1);
                 if (!skip)
-                    vm->in_reclaim++;
+                    vm->inReclaim++;
                 pthread_mutex_unlock(&vm->lock);
 
                 if (skip) {
@@ -798,18 +798,18 @@ static void MonitorAndReclaim(HeatManager *mgr)
                 if (!task) {
                     LOG_ERR("Failed to allocate reclaim task\n");
                     pthread_mutex_lock(&vm->lock);
-                    vm->in_reclaim--;
+                    vm->inReclaim--;
                     pthread_mutex_unlock(&vm->lock);
                     vm = vm->next;
                     continue;
                 }
                 task->vm = vm;
                 task->node = node;
-                task->reclaim_pages = VMCalculateReclaimPages(vm, pressure);
+                task->reclaimPages = VMCalculateReclaimPages(vm, pressure);
 
-                if (!task->reclaim_pages) {
+                if (!task->reclaimPages) {
                     pthread_mutex_lock(&vm->lock);
-                    vm->in_reclaim--;
+                    vm->inReclaim--;
                     pthread_mutex_unlock(&vm->lock);
                     free(task);
                     vm = vm->next;
@@ -819,7 +819,7 @@ static void MonitorAndReclaim(HeatManager *mgr)
                 if (tCount >= 128) {
                     LOG_ERR("Worker count exceeded limit\n");
                     pthread_mutex_lock(&vm->lock);
-                    vm->in_reclaim--;
+                    vm->inReclaim--;
                     pthread_mutex_unlock(&vm->lock);
                     free(task);
                     break;
@@ -830,7 +830,7 @@ static void MonitorAndReclaim(HeatManager *mgr)
                     tCount++;
                 } else {
                     pthread_mutex_lock(&vm->lock);
-                    vm->in_reclaim--;
+                    vm->inReclaim--;
                     pthread_mutex_unlock(&vm->lock);
                     free(task);
                 }
@@ -875,9 +875,9 @@ int main()
     HeatManager mgr = {0};
     pthread_rwlock_init(&mgr.rwlock, NULL);
     /* 热度采样间隔，单位：秒 */
-    mgr.sample_interval_s = 10;
+    mgr.sampleIntervalS = 10;
     /* EMA平滑系数 (0~1)，越大越平滑，越小越敏感 */
-    mgr.ema_alpha = 0.7;
+    mgr.emaAlpha = 0.7;
 
     if (pthread_create(&heatTid, NULL, HeatSamplingThread, &mgr)) {
         LOG_ERR("create heat thread failed\n");
