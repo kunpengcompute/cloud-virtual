@@ -1,5 +1,7 @@
 # VM Huge-Page Memory Configuration Reduction Feature Guide
 
+<!-- md-trans-meta sourceCommit=f3053cc78eaa12d3fe1a1b36a39ebd2fa95be799 translatedAt=2026-09-11T08:39:12.179Z pushedAt=2026-09-15T07:05:54.693Z -->
+
 ## Feature Description
 
 ### Overview
@@ -17,6 +19,7 @@ The VM huge-page memory configuration reduction feature is implemented by the ZR
 | ZRAM module| Provides the huge-page memory swap backend to compress and store the swapped cold-page memory to save physical memory.|
 | KAE| Provides hardware-level acceleration for ZRAM compression and decompression operations to improve the compression efficiency and reduce the CPU usage.|
 | Huge-page memory management tool| Implements cold and hot tiering for user-space huge-page memory and proactive swap.|
+| memlink service | Provides score-based hot/cold huge-page memory classification, guest page cache reclamation, and memory compaction. |
 | Kernel huge-page memory swap system| Allows huge-page memory to be swappable.|
 
 ## Environment Requirements
@@ -33,13 +36,14 @@ Before enabling this feature, ensure that the hardware and software environments
 
 | Item| Version or Description|
 |--|--|
-| OS | openEuler 24.03 SP3|
+| OS | openEuler 24.03 LTS SP3|
 | Kernel source code baseline| OLK-6.6 6.6.0-132.0.0|
 | libvirt | 9.10.0 (Yum repository)|
 | QEMU| 8.2.0 (Yum repository)|
+| memlink | 1.0.0-214 (Yum repository) |
 | Redis| 6.2.0 (You can install any version by yourself. This document uses 6.2.0 as an example.)|
 | Nginx| 1.24.0 (You can install any version by yourself. This document uses 1.24.0 as an example.)|
-| wrk | 4.1.0 (You can install any version by yourself. This document uses 4.1.0 as an example.)|  
+| wrk | 4.1.0 (You can install any version by yourself. This document uses 4.1.0 as an example.)|
 
 ## Software Compilation
 
@@ -125,6 +129,22 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     reboot
     ```
 
+### (Optional) Upgrading the Guest Kernel Version
+
+To enable guest page cache reclamation, change the guest kernel to `kernel-6.6.0-145.3.27.158.20260826.b7db8e91096e.oe2403sp3.aarch64` or later.
+
+1. Install the new kernel.
+
+   ```bash
+   yum install -y kernel-6.6.0-145.3.27.158.20260826.b7db8e91096e.oe2403sp3.aarch64
+   ```
+
+2. Restart the VM and switch to the newly installed kernel.
+
+   ```bash
+   reboot
+   ```
+
 ### Compiling and Installing KAE
 
 1. Obtain the KAE source code.
@@ -138,6 +158,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
 2. Compile and install KAE.
 
     ```bash
+    sh build.sh cleanup
     sh build.sh all
     ```
 
@@ -148,32 +169,6 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     ```
 
     ![Example of successful KAE installation](figures/en-us_image_0000002518691588.png)
-
-### Obtaining the memlink Tool
-
-1. Obtain the memlink source code.
-
-    ```bash
-    cd /home/
-    git clone https://gitcode.com/openeuler/memlinkd.git
-    ```
-
-2. Compile the source code.
-
-    ```bash
-    cd memlinkd
-    yum-builddep memlinkd.spec
-    tar jcvf memlinkd.tar.bz2 --exclude=.git src
-    mkdir -p /root/rpmbuild/SOURCES/
-    cp memlinkd.tar.bz2 /root/rpmbuild/SOURCES/
-    rpmbuild -ba memlinkd.spec
-    ```
-
-3. Install the memlink SDK.
-
-    ```bash
-    cd /root/rpmbuild/RPMS/aarch64/;rpm -ivh memlinkd-*
-    ```
 
 ### Obtaining the Huge-Page Memory Management Tool
 
@@ -199,7 +194,7 @@ This tool is used only for function demonstration. It provides the methods of us
 Install the software packages related to libvirt and QEMU.
 
     ```bash
-    yum install -y libvirt qemu edk2-aarch64
+    yum install -y libvirt qemu edk2-aarch64 memlinkd
     ```
 
 ### Installing VM Software
@@ -230,6 +225,7 @@ During the test, you can dynamically adjust the number of huge pages on each NUM
     |hugepage-ondemand|Enables the huge-page pod option for dynamic huge-page allocation. If this option is not configured, it is disabled by default.|
     |cputune|Binds the VM to cores.|
     |numatune|Binds the VM to memory.|
+    |memballoon|(Optional) Configures the memory balloon device to enable guest page cache reclamation.|
 
     ```xml
     <memoryBacking>
@@ -251,6 +247,12 @@ During the test, you can dynamically adjust the number of huge pages on each NUM
         <cell id='0' cpus='0-1' memory='8388608' unit='KiB' memAccess='shared'/>
       </numa>
     </cpu>
+   <!--The following content is optional and is used to enable the guest pagecache reclaim function.-->
+   <devices>
+     <memballoon model='virtio' freePageReporting='on' memop='on'>
+      <alias name='balloon0'/>
+     </memballoon>
+   </devices>
     ```
 
 2. Edit the VM XML configuration file to configure the memory reclamation policy tag for the VM. This tag must be configured for all VMs. The tag content is used to determine whether memory reclamation is allowed.
@@ -274,7 +276,22 @@ Note: The reclamation tag is a user-defined metadata tag. The example provided i
 
 ### Starting the memlink Tool
 
-1. Modify the memlink configuration, including the following configuration items.
+The memlink configuration parameters are described as follows:
+
+| Tag Name | Description |
+|--|--|
+|page_score_enable |Switch for score-based hot/cold huge-page memory classification.|
+|page_score_poll_cycle_sec|Update cycle for score-based hot/cold huge-page memory classification.|
+|pagecache_reclaim_enable|Reclamation switch.|
+|pagecache_reclaim_high_percent|High watermark (%) for page cache as a share of available memory.|
+|pagecache_reclaim_step_kb|Reclamation step size in each cycle (in KB). |
+|pagecache_reclaim_poll_cycle_sec|Polling cycle (in seconds). |
+|compaction_enable|Memory compaction switch (disabled by default).|
+|compaction_frag_high_percent|High watermark (%) triggering memory compaction, which defaults to `50`.|
+|compaction_cpu_low_percent|Upper limit of vCPU usage (%) that triggers compaction.|
+|compaction_poll_cycle_sec|Polling cycle (in seconds).|
+
+1. Modify the memlink configuration to enable huge-page memory scoring. The following configuration items are modified.
 
     ```bash
     vim /etc/memlinkd.conf
@@ -285,7 +302,25 @@ Note: The reclamation tag is a user-defined metadata tag. The example provided i
     page_score_poll_cycle_sec=5
     ```
 
-2. Start the memlink tool.
+2. (Optional) Enable guest page cache reclamation.
+
+   ```text
+   pagecache_reclaim_enable=1
+   pagecache_reclaim_high_percent=50
+   pagecache_reclaim_step_kb=524288
+   pagecache_reclaim_poll_cycle_sec=10
+   ```
+
+3. (Optional) Enable guest memory compaction.
+
+   ```text
+   compaction_enable=1
+   compaction_frag_high_percent=50
+   compaction_cpu_low_percent=30
+   compaction_poll_cycle_sec=30
+   ```
+
+4. Start the memlink tool.
 
     ```bash
     modprobe etmem_scan
@@ -471,3 +506,9 @@ The following uses a single NUMA node with 60 GB huge pages as an example. The n
 8. After the memory usage of the VMs exceeds 64 GB and the number of remaining huge pages on the physical machine decreases to 0, check whether the VMs run properly. If they run properly, continue the stress test and check whether the memory usage of the VMs keeps increasing. In this case, the VM performance is not guaranteed.
 
 9. You are advised to select VMs with low pressure for live migration when the number of remaining huge pages is less than 10% of the total huge pages, so that huge pages can be released to VMs with high pressure. In actual use, you can adjust the migration threshold based on the scenario and requirements to avoid the out of memory (OOM) situation. In any scenario, if the physical machine is in the OOM state, the VM performance cannot be ensured.
+
+## Change History
+
+|Version|Date|Description|
+|-------|-------|-------|
+|01|2026-09-30|This is the first official release.|
