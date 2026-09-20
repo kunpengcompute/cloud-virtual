@@ -133,7 +133,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-devel-6.6.0+-1.aarch64.rpm --force
     ```
 
-5. 编辑 `/etc/grub2-efi.cfg` 文件，添加大页内存参数，大页数量根据实际环境调整。
+5. 编辑 `/etc/grub2-efi.cfg` 文件，为新安装的内核添加大页内存参数，大页数量根据实际环境调整，修改可以参考[开启内存大页](https://www.hikunpeng.com/document/detail/zh/kunpengcpfs/systuningguide/systemtg/kunpeng_shty_zn_64_005.html)。
 
     ```text
     "default_hugepagesz=2M hugepagesz=2M hugepages=131072 hugetlb_swap=on"
