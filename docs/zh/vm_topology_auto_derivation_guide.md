@@ -16,7 +16,7 @@
 - 补丁基于openEuler社区版本，使用其他版本的qemu或libvirt可能导致异常，需要用户根据实际情况进行评估。
 - 本特性仅适用于ARM架构（aarch64）平台。
 - 本特性要求qemu基于openEuler社区qemu v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
-- 当**auto_topology='yes'**且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
+- 当auto_topology='yes'且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
 - auto_topology启用时，vCPU可能被分配在不同的NUMA（Non-Uniform Memory Access，非统一内存访问）节点上，需要用户按照实际的NUMA节点配置合适的内存绑定节点信息，且内存绑定规则需符合真实硬件结构。
 
 #### 与其他特性的交互
@@ -43,9 +43,9 @@
 
 auto_topology可与sockets、clusters、cores、threads显式拓扑配置共存，显式拓扑作为降级回退配置。
 
-- 当`auto_topology='yes'`且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，使用自动推导拓扑，忽略显式拓扑配置。
-- 当`auto_topology='yes'`但`<cputune>`条件不满足时，给出告警日志，降级为`auto_topology=no`，使用显式拓扑配置。
-- 当`auto_topology='yes'`但未配置显式拓扑且`<cputune>`条件不满足时，将使用libvirt默认的拓扑配置。
+- 当auto_topology='yes'且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，使用自动推导拓扑，忽略显式拓扑配置。
+- 当auto_topology='yes'但`<cputune>`条件不满足时，给出告警日志，降级为auto_topology=no，使用显式拓扑配置。
+- 当auto_topology='yes'但未配置显式拓扑且`<cputune>`条件不满足时，将使用libvirt默认的拓扑配置。
 
 ## 软件编译
 
@@ -194,7 +194,7 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
 </domain>
 ```
 
-`auto_topology='yes'`表示拓扑从vCPU绑核信息自动推导，降级规则请参见[原理描述](#原理描述)。推荐配置方式（带降级回退）。
+auto_topology='yes'表示拓扑从vCPU绑核信息自动推导，降级规则请参见[原理描述](#原理描述)。推荐配置方式（带降级回退）。
 
 ```xml
 <domain>
@@ -294,7 +294,7 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 
 | 参数 | 类型 | 必选 | 说明 |
 |------|------|------|------|
-| auto-topology | bool | 是 | 是否启用灵活CCL拓扑，需与xml中**auto_topology='yes'**对应。 |
+| auto-topology | bool | 是 | 是否启用灵活CCL拓扑，需与xml中auto_topology='yes'对应。 |
 | vcpu-pinning | array | 是 | vCPU绑核映射数组。 |
 | vcpu-pinning[].vcpu-id | int | 是 | 虚拟cpu编号，从0开始。 |
 | vcpu-pinning[].pcpu-id | int | 是 | 绑定的物理cpu编号。 |
