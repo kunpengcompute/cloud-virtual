@@ -98,7 +98,7 @@ cat /sys/class/net/网卡名/device/numa_node
         </hugepages>
       </memoryBacking>
     ...
-    <domain>
+    </domain>
     ```
 
 ### 开启GICv4.1<a name="ZH-CN_TOPIC_0000002549891511" id="开启GICv4.1"></a>
