@@ -1,4 +1,4 @@
-# 虚拟机拓扑灵活自动推导特性
+# 虚拟机拓扑灵活自动推导 用户指南
 
 ## 特性描述
 
@@ -6,19 +6,17 @@
 
 引入虚拟机拓扑自动推导，允许ARM用户在已知vCPU（virtual CPU，虚拟处理器）的绑核规则的条件下，自动按照绑定的pCPU（physical CPU，物理处理器）结构配置虚拟机内的拓扑。
 
-传统方式下，虚拟机拓扑需通过sockets、clusters、cores、threads显式配置，当显式配置与vCPU实际绑定的物理拓扑不一致时，虚拟机OS无法正确划分调度域，多线程任务中容易产生跨CCL（CPU Core Cluster，处理器核簇）调度。本特性由qemu在虚拟机启动阶段根据vCPU绑核关系自动推导虚拟机拓扑，并据此构建虚拟机的PPTT（Processor Physical Topology Table，处理器物理拓扑表），使虚拟机内呈现的处理器拓扑与实际绑核的物理结构一致，从而正确划分调度域，减少跨CCL调度。
+传统方式下，虚拟机拓扑需通过sockets、clusters、cores、threads显式配置，当显式配置与vCPU实际绑定的物理拓扑不一致时，虚拟机OS无法正确划分调度域，多线程任务中容易产生跨CCL（CPU Core Cluster，处理器核簇）调度。本特性由QEMU在虚拟机启动阶段根据vCPU绑核关系自动推导虚拟机拓扑，并据此构建虚拟机的PPTT（Processor Physical Topology Table，处理器物理拓扑表），使虚拟机内呈现的处理器拓扑与实际绑核的物理结构一致，从而正确划分调度域，减少跨CCL调度。
 
 ### 约束与限制
 
-- 应用限制
-    - 安装的libvirt和qemu可能替换系统版本，可能造成其他用户或者虚拟机的异常。
-    - 补丁基于openEuler社区版本，使用其他版本的qemu或libvirt可能导致异常，需要用户根据实际情况进行评估。
-
 #### 应用限制
 
+- 安装的libvirt和QEMU可能替换系统版本，可能造成其他用户或者虚拟机的异常。
+- 补丁基于openEuler社区版本，使用其他版本的QEMU或libvirt可能导致异常，需要用户根据实际情况进行评估。
 - 本特性仅适用于ARM架构（aarch64）平台。
-- 本特性要求qemu基于openEuler社区qemu v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
-- 当**auto_topology='yes'**且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
+- 本特性要求QEMU基于openEuler社区QEMU v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
+- 当auto_topology='yes'且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
 - auto_topology启用时，vCPU可能被分配在不同的NUMA（Non-Uniform Memory Access，非统一内存访问）节点上，需要用户按照实际的NUMA节点配置合适的内存绑定节点信息，且内存绑定规则需符合真实硬件结构。
 
 #### 与其他特性的交互
@@ -36,40 +34,40 @@
 
 ### 原理描述
 
-虚拟机拓扑灵活自动推导的整体流程如下：
+虚拟机拓扑灵活自动推导的整体流程如下。
 
 1. 用户在虚拟机xml中配置vCPU绑核信息（`<cputune>`），并在`<cpu>`小节中启用自动拓扑（`<topology auto_topology='yes'/>`）。
-2. libvirt在虚拟机启动阶段解析xml，当满足自动推导条件时，通过QMP（QEMU Machine Protocol，QEMU机器协议）命令`set-vcpu-pinning`将vCPU与pCPU的绑核关系传递给qemu。
-3. qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
+2. libvirt在虚拟机启动阶段解析xml，当满足自动推导条件时，通过QMP（QEMU Machine Protocol，QEMU机器协议）命令`set-vcpu-pinning`将vCPU与pCPU的绑核关系传递给QEMU。
+3. QEMU收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
 4. 虚拟机OS根据PPTT呈现的拓扑正确划分调度域，在多线程任务中减少跨CCL调度。
 
-auto_topology可与sockets、clusters、cores、threads显式拓扑配置共存，显式拓扑作为降级回退配置：
+auto_topology可与sockets、clusters、cores、threads显式拓扑配置共存，显式拓扑作为降级回退配置。
 
-- 当`auto_topology='yes'`且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，使用自动推导拓扑，忽略显式拓扑配置。
-- 当`auto_topology='yes'`但`<cputune>`条件不满足时，给出告警日志，降级为`auto_topology=no`，使用显式拓扑配置。
-- 当`auto_topology='yes'`但未配置显式拓扑且`<cputune>`条件不满足时，将使用libvirt默认的拓扑配置。
+- 当auto_topology='yes'且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，使用自动推导拓扑，忽略显式拓扑配置。
+- 当auto_topology='yes'但`<cputune>`条件不满足时，给出告警日志，降级为auto_topology=no，使用显式拓扑配置。
+- 当auto_topology='yes'但未配置显式拓扑且`<cputune>`条件不满足时，将使用libvirt默认的拓扑配置。
 
 ## 软件编译
 
 ### 编译流程
 
-本特性的编译分为qemu补丁和libvirt补丁两部分，每部分均包括获取基线版本、应用补丁、编译安装三个步骤，详细操作请参见[编译代码](#编译代码)。
+本特性的编译分为QEMU补丁和libvirt补丁两部分，每部分均包括获取基线版本、应用补丁、编译安装三个步骤，详细操作请参见[编译代码](#编译代码)。
 
 ### 配置编译环境
 
 #### 环境要求
 
-本特性无特殊编译环境要求，使用qemu、libvirt开源社区默认编译环境即可。
+本特性无特殊编译环境要求，使用QEMU、libvirt开源社区默认编译环境即可。
 
 ### 编译代码
 
-#### 编译安装qemu补丁
+#### 编译安装QEMU补丁
 
-qemu基于openEuler社区的qemu v8.2.0版本。
+QEMU基于openEuler社区的QEMU v8.2.0版本。
 
-补丁地址：
+补丁地址如下。
 
-- [qemu](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
+- [QEMU](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
   - `0001-qemu-8.2.0-set-vcpu-pinning-qmp-command.patch`
   - `0002-qemu-8.2-build-pptt-auto-topology.patch`
   - `0003-hw-arm-virt-build-PPTT-vcpu-nodes-in-uniform-core-th.patch`
@@ -102,7 +100,7 @@ qemu基于openEuler社区的qemu v8.2.0版本。
 
 libvirt基于openEuler社区的libvirt v9.10.0版本。
 
-补丁地址：
+补丁地址如下。
 
 - [libvirt](https://atomgit.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0)
   - `0001-auto-topology_support.patch`
@@ -138,25 +136,25 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 | 项目 | 要求 |
 | ---- | ---- |
-| 处理器 | 鲲鹏920、950系列处理器（本文以鲲鹏950处理器为例） |
+| 处理器 | 鲲鹏920新型号处理器或鲲鹏950处理器（本文以鲲鹏950处理器为例） |
 
 **软件要求**
 
 | 软件名称 | 软件版本 | 说明 |
 | ------ | ------ | ---- |
-| qemu | openEuler社区 qemu v8.2.0 + 特性补丁 | 补丁编译安装请参见[编译安装qemu补丁](#编译安装qemu补丁)。 |
-| libvirt | openEuler社区 libvirt v9.10.0 + 特性补丁 | 补丁编译安装请参见[编译安装libvirt补丁](#编译安装libvirt补丁)。 |
+| QEMU | openEuler社区QEMU v8.2.0及以上特性补丁 | 补丁编译安装请参见[编译安装QEMU补丁](#编译安装QEMU补丁)。 |
+| libvirt | openEuler社区libvirt v9.10.0及以上特性补丁 | 补丁编译安装请参见[编译安装libvirt补丁](#编译安装libvirt补丁)。 |
 
 ### 获取软件
 
-本特性软件为qemu与libvirt特性补丁，补丁地址如下：
+本特性软件为QEMU与libvirt特性补丁，补丁地址如下。
 
-- [qemu补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
+- [QEMU补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
 - [libvirt补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0)
 
 ### 部署/安装虚拟机拓扑灵活自动推导
 
-本特性无独立部署步骤，qemu与libvirt特性补丁编译安装完成后即完成部署，请参见[软件编译](#软件编译)。
+本特性无独立部署步骤，QEMU与libvirt特性补丁编译安装完成后即完成部署，请参见[软件编译](#软件编译)。
 
 ## 使用特性
 
@@ -164,9 +162,9 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需要完成vCPU绑核配置、自动拓扑配置和NUMA内存绑定配置。
 
-**配置vCPU绑核信息**
+**配置vCPU绑核信息和NUMA绑定信息**
 
-用户需要配置vCPU的绑核信息，以下为8C虚拟机的xml配置示例：
+用户需要配置vCPU的绑核信息，以下为8C虚拟机的xml配置示例。
 
 ```xml
 <domain>
@@ -181,15 +179,12 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
     <vcpupin vcpu='6' cpuset='18'/>
     <vcpupin vcpu='7' cpuset='19'/>
   </cputune>
-  <numatune>
-    <memory mode='strict' nodeset='0'/>
-  </numatune>
 </domain>
 ```
 
 **配置自动拓扑**
 
-同时在xml的`<cpu>`小节中写入自动拓扑配置：
+同时在xml的`<cpu>`小节中写入自动拓扑配置，需要同步配置NUMA的拓扑信息。
 
 ```xml
 <domain>
@@ -199,7 +194,7 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
 </domain>
 ```
 
-`auto_topology='yes'`表示拓扑从vCPU绑核信息自动推导，降级规则请参见[原理描述](#原理描述)。推荐配置方式（带降级回退）：
+auto_topology='yes'表示拓扑从vCPU绑核信息自动推导，降级规则请参见[原理描述](#原理描述)。推荐配置方式（带降级回退）。
 
 ```xml
 <domain>
@@ -211,7 +206,7 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
 
 **配置NUMA内存绑定**
 
-auto_topology启用时，按照绑核的配置，vCPU可能会分配在不同的NUMA节点上。此时需要用户按照实际的NUMA节点去配置合适的内存绑定节点信息。
+auto_topology启用时，按照绑核的配置，需要用户按照实际的NUMA节点去配置合适的内存绑定节点信息。
 
 | vCPU id | vccl | vsocket | pCPU id | ccl id | socket id |
 |---------|------|---------|---------|--------|-----------|
@@ -224,13 +219,12 @@ auto_topology启用时，按照绑核的配置，vCPU可能会分配在不同的
 <domain>
   ……
   <numatune>
-    <memory cellid='0' mode='strict' nodeset='0'/>
-    <memory cellid='1' mode='strict' nodeset='1'/>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
+    <memnode cellid='1' mode='strict' nodeset='1'/>
   </numatune>
 
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
-
     <numa>
         <cell id='0' cpus='0-15' memory='24' unit='GiB'/>
         <cell id='1' cpus='16-31' memory='24' unit='GiB'/>
@@ -241,14 +235,14 @@ auto_topology启用时，按照绑核的配置，vCPU可能会分配在不同的
 
 ### QMP接口说明
 
-qemu通过QMP命令接收libvirt传递的vCPU绑核信息。
+QEMU通过QMP命令接收libvirt传递的vCPU绑核信息。
 
 **新增QMP命令：`set-vcpu-pinning`**
 
-libvirt在虚拟机启动阶段，通过该命令将vCPU与pCPU的绑核关系传递给qemu。
-qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
+libvirt在虚拟机启动阶段，通过该命令将vCPU与pCPU的绑核关系传递给QEMU。
+QEMU收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
 
-命令格式：
+命令格式如下。
 
 ```json
 {
@@ -277,7 +271,7 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 }
 ```
 
-返回：
+返回如下。
 
 ```json
 {
@@ -285,7 +279,7 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 }
 ```
 
-错误返回：
+错误返回如下。
 
 ```json
 {
@@ -300,10 +294,19 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 
 | 参数 | 类型 | 必选 | 说明 |
 |------|------|------|------|
-| auto-topology | bool | 是 | 是否启用灵活CCL拓扑，需与xml中**auto_topology='yes'**对应。 |
+| auto-topology | bool | 是 | 是否启用灵活CCL拓扑，需与xml中auto_topology='yes'对应。 |
 | vcpu-pinning | array | 是 | vCPU绑核映射数组。 |
 | vcpu-pinning[].vcpu-id | int | 是 | 虚拟cpu编号，从0开始。 |
 | vcpu-pinning[].pcpu-id | int | 是 | 绑定的物理cpu编号。 |
+
+### 调度域说明
+
+虚拟机调度域按core、CCL、NUMA、整机四个层级构建。
+
+- core调度域：当服务器开启超线程时，同一物理核下的两个超线程构成core调度域，调度仅发生在这两个超线程之间。
+- CCL调度域：以L3缓存为基本单位，范围随服务器类型而不同。鲲鹏920新型号处理器上一个NUMA共享一个L3缓存，CCL调度域范围即NUMA；鲲鹏950处理器上一个cluster共享一个L3缓存，CCL调度域范围即cluster。
+- NUMA调度域：由虚拟机XML文件指定。注意此处的NUMA并非物理机上的NUMA，而是XML中为虚拟机绑定的NUMA——若在XML中绑定了NUMA范围，则会在每个NUMA范围内生成对应层级的调度域。
+- 整机调度域：覆盖虚拟机绑定的全部vCPU，为最高层级调度域。
 
 ### 使用效果
 
@@ -351,16 +354,35 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='27' cpuset='31'/>
   </cputune>
   <numatune>
-    <memory mode='strict' nodeset='0'/>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
   </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
+    <numa>
+      <cell id='0' cpus='0-27' memory='8' unit='GiB'/>
+    </numa>
   </cpu>
   ……
 </domain>
 ```
 
-在鲲鹏950处理器上启动虚拟机时，虚拟机vCPU0-11会在一个CCL中，cpu12-27会在另一个CCL中，OS可以正确划分调度域，在多线程任务中可以减少跨CCL调度。
+鲲鹏950处理器（CCL = cluster）上启动时，预期有core、CCL、NUMA、整机四层调度域。
+
+- core域：只有当同一物理核下的两个超线程被绑定给一对vCPU时，这两个vCPU之间才会形成core调度域——如vCPU0-1对应同一物理核的两个超线程、vCPU2-3对应下一个物理核的两个超线程，以此类推，调度仅发生在这对超线程之间；若两个vCPU绑定在不同的物理核上，即使编号相邻也不会形成core调度域。
+- CCL域：鲲鹏950处理器的CCL即cluster（一个cluster共享一个L3缓存），划分跟随物理L3边界——vCPU0-11属于一个CCL，vCPU12-27属于另一个CCL。
+- NUMA域：由虚拟机XML文件中绑定的NUMA（guest cell）决定，而非物理机NUMA——本例XML只定义了一个cell（cpus='0-27'），因此虚拟机NUMA域覆盖全部vCPU0-27，与被物理L3切成两段的CCL域边界并不重合。
+- 整机域：覆盖全部vCPU0-27。
+
+由于虚拟机NUMA域与整机域范围完全重复，NUMA域被折叠，实际呈现3层调度域：core、CCL、整机。
+
+鲲鹏920新型号处理器（CCL = NUMA）上启动时，预期同样有四层调度域。
+
+- core域：形成条件同鲲鹏950处理器——仅存在于同一物理核下两个超线程对应的vCPU之间。
+- CCL域：鲲鹏920新型号处理器的CCL即NUMA（一个NUMA共享一个L3缓存），全部vCPU0-27落在同一L3/NUMA范围内，因此CCL域覆盖全部vCPU。
+- NUMA域：同样由XML中绑定的guest cell决定（非物理机NUMA），本例单cell覆盖vCPU0-27。
+- 整机域：覆盖全部vCPU0-27。
+
+由于CCL域、NUMA域与整机域范围完全重复，三者合并为一层，实际呈现2层调度域：core、整机。
 
 **场景二：利用零散剩余处理器创建大规格虚拟机**
 
@@ -386,11 +408,43 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='14' cpuset='242'/>
     <vcpupin vcpu='15' cpuset='243'/>
   </cputune>
+  <numatune>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
+    <memnode cellid='1' mode='strict' nodeset='1'/>
+    <memnode cellid='2' mode='strict' nodeset='2'/>
+  </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
+    <numa>
+      <cell id='0' cpus='0-4' memory='2' unit='GiB'/>
+      <cell id='1' cpus='5-8' memory='2' unit='GiB'/>
+      <cell id='2' cpus='9-15' memory='4' unit='GiB'/>
+    </numa>
   </cpu>
   ……
 </domain>
 ```
 
-上述例子中cpu分布在不同的cluster、numa node中，且数量不一致，自动拓扑推导可以将物理cpu在同一CCL上的vCPU也分配在同一CCL中。
+鲲鹏950处理器（CCL = cluster）上启动时，预期有core、CCL、NUMA、整机四层调度域。
+
+- core域：只有当同一物理核下的两个超线程被绑定给一对vCPU时才形成。本例形成配对的是：vCPU0-1（pCPU4,5）、vCPU3-4（pCPU30,31）、vCPU5-6（pCPU108,109）、vCPU9-10（pCPU200,201）、vCPU11-12（pCPU202,203）、vCPU14-15（pCPU242,243）；而vCPU2、7、8、13的超线程（pCPU7、111、113、240）未绑定给虚拟机，因此这4个vCPU不构成core域。
+- CCL域：鲲鹏950处理器的CCL即cluster（一个cluster共享一个L3缓存），划分跟随物理L3边界——16个vCPU分布在6个物理cluster上：vCPU0-2、vCPU3-4、vCPU5-7、vCPU8、vCPU9-12、vCPU13-15各属一个CCL。
+- NUMA域：由虚拟机XML文件中绑定的NUMA（guest cell）决定，而非物理机NUMA——本例定义了3个cell：cell0（vCPU0-4）、cell1（vCPU5-8）、cell2（vCPU9-15），生成3个NUMA域，其边界与物理CCL并不重合（如cell0的vCPU0-4横跨两个物理cluster）。
+- 整机域：覆盖全部16个vCPU。
+
+四层范围互不重复，无折叠发生，实际呈现4层调度域：core、CCL、NUMA、整机。
+
+鲲鹏920新型号处理器（CCL = NUMA）上启动时，预期同样有四层调度域。
+
+- core域：形成条件与配对情况同鲲鹏950处理器。
+- CCL域：鲲鹏920新型号处理器的CCL即NUMA（一个NUMA共享一个L3缓存），vCPU按物理NUMA归属分为3段：vCPU0-4（物理node0）、vCPU5-8（物理node1）、vCPU9-15（物理node2）。
+- NUMA域：同样由XML中绑定的guest cell决定（非物理机NUMA），3个cell的覆盖范围与CCL域完全一致。
+- 整机域：覆盖全部16个vCPU。
+
+由于CCL域与NUMA域范围完全重复，两者合并为一层，实际呈现3层调度域：core、CCL（NUMA）、整机。
+
+## 修订记录
+
+| 文档版本 | 发布日期   | 修改说明         |
+| -------- | ---------- | ---------------- |
+| 01       | 2026-09-30 | 第一次正式发布。 |
