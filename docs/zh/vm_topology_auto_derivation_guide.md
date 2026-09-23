@@ -354,7 +354,7 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='27' cpuset='31'/>
   </cputune>
   <numatune>
-    <memnode='0' mode='strict' nodeset='0'/>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
   </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
@@ -409,9 +409,9 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
     <vcpupin vcpu='15' cpuset='243'/>
   </cputune>
   <numatune>
-    <memnode='0' mode='strict' nodeset='0'/>
-    <memnode='1' mode='strict' nodeset='1'/>
-    <memnode='2' mode='strict' nodeset='2'/>
+    <memnode cellid='0' mode='strict' nodeset='0'/>
+    <memnode cellid='1' mode='strict' nodeset='1'/>
+    <memnode cellid='2' mode='strict' nodeset='2'/>
   </numatune>
   <cpu mode='host-passthrough' check='none'>
     <topology auto_topology='yes'/>
