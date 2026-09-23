@@ -142,8 +142,8 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 | 软件名称 | 软件版本 | 说明 |
 | ------ | ------ | ---- |
-| qemu | openEuler社区qemu v8.2.0+特性补丁 | 补丁编译安装请参见[编译安装qemu补丁](#编译安装qemu补丁)。 |
-| libvirt | openEuler社区libvirt v9.10.0+特性补丁 | 补丁编译安装请参见[编译安装libvirt补丁](#编译安装libvirt补丁)。 |
+| qemu | openEuler社区qemu v8.2.0及以上特性补丁 | 补丁编译安装请参见[编译安装qemu补丁](#编译安装qemu补丁)。 |
+| libvirt | openEuler社区libvirt v9.10.0及以上特性补丁 | 补丁编译安装请参见[编译安装libvirt补丁](#编译安装libvirt补丁)。 |
 
 ### 获取软件
 
