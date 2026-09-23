@@ -370,10 +370,10 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 
 - core域：只有当同一物理核下的两个超线程被绑定给一对vCPU时，这两个vCPU之间才会形成core调度域——如vCPU0-1对应同一物理核的两个超线程、vCPU2-3对应下一个物理核的两个超线程，以此类推，调度仅发生在这对超线程之间；若两个vCPU绑定在不同的物理核上，即使编号相邻也不会形成core调度域。
 - CCL域：鲲鹏950处理器的CCL即cluster（一个cluster共享一个L3缓存），划分跟随物理L3边界——vCPU0-11属于一个CCL，vCPU12-27属于另一个CCL。
-- NUMA域：由虚拟机XML文件中绑定的NUMA（guest cell）决定，而非物理机NUMA——本例XML只定义了一个cell（cpus='0-27'），因此虚机NUMA域覆盖全部vCPU0-27，与被物理L3切成两段的CCL域边界并不重合。
+- NUMA域：由虚拟机XML文件中绑定的NUMA（guest cell）决定，而非物理机NUMA——本例XML只定义了一个cell（cpus='0-27'），因此虚拟机NUMA域覆盖全部vCPU0-27，与被物理L3切成两段的CCL域边界并不重合。
 - 整机域：覆盖全部vCPU0-27。
 
-由于虚机NUMA域与整机域范围完全重复，NUMA域被折叠，实际呈现3层调度域：core、CCL、整机。
+由于虚拟机NUMA域与整机域范围完全重复，NUMA域被折叠，实际呈现3层调度域：core、CCL、整机。
 
 鲲鹏920新型号处理器（CCL = NUMA）上启动时，预期同样有四层调度域。
 
@@ -427,7 +427,7 @@ qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟�
 
 鲲鹏950处理器（CCL = cluster）上启动时，预期有core、CCL、NUMA、整机四层调度域。
 
-- core域：只有当同一物理核下的两个超线程被绑定给一对vCPU时才形成。本例形成配对的是：vCPU0-1（pCPU4,5）、vCPU3-4（pCPU30,31）、vCPU5-6（pCPU108,109）、vCPU9-10（pCPU200,201）、vCPU11-12（pCPU202,203）、vCPU14-15（pCPU242,243）；而vCPU2、7、8、13的超线程（pCPU7、111、113、240）未绑定给虚机，因此这4个vCPU不构成core域。
+- core域：只有当同一物理核下的两个超线程被绑定给一对vCPU时才形成。本例形成配对的是：vCPU0-1（pCPU4,5）、vCPU3-4（pCPU30,31）、vCPU5-6（pCPU108,109）、vCPU9-10（pCPU200,201）、vCPU11-12（pCPU202,203）、vCPU14-15（pCPU242,243）；而vCPU2、7、8、13的超线程（pCPU7、111、113、240）未绑定给虚拟机，因此这4个vCPU不构成core域。
 - CCL域：鲲鹏950处理器的CCL即cluster（一个cluster共享一个L3缓存），划分跟随物理L3边界——16个vCPU分布在6个物理cluster上：vCPU0-2、vCPU3-4、vCPU5-7、vCPU8、vCPU9-12、vCPU13-15各属一个CCL。
 - NUMA域：由虚拟机XML文件中绑定的NUMA（guest cell）决定，而非物理机NUMA——本例定义了3个cell：cell0（vCPU0-4）、cell1（vCPU5-8）、cell2（vCPU9-15），生成3个NUMA域，其边界与物理CCL并不重合（如cell0的vCPU0-4横跨两个物理cluster）。
 - 整机域：覆盖全部16个vCPU。
