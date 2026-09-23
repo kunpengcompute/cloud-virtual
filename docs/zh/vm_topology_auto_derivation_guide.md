@@ -6,16 +6,16 @@
 
 引入虚拟机拓扑自动推导，允许ARM用户在已知vCPU（virtual CPU，虚拟处理器）的绑核规则的条件下，自动按照绑定的pCPU（physical CPU，物理处理器）结构配置虚拟机内的拓扑。
 
-传统方式下，虚拟机拓扑需通过sockets、clusters、cores、threads显式配置，当显式配置与vCPU实际绑定的物理拓扑不一致时，虚拟机OS无法正确划分调度域，多线程任务中容易产生跨CCL（CPU Core Cluster，处理器核簇）调度。本特性由qemu在虚拟机启动阶段根据vCPU绑核关系自动推导虚拟机拓扑，并据此构建虚拟机的PPTT（Processor Physical Topology Table，处理器物理拓扑表），使虚拟机内呈现的处理器拓扑与实际绑核的物理结构一致，从而正确划分调度域，减少跨CCL调度。
+传统方式下，虚拟机拓扑需通过sockets、clusters、cores、threads显式配置，当显式配置与vCPU实际绑定的物理拓扑不一致时，虚拟机OS无法正确划分调度域，多线程任务中容易产生跨CCL（CPU Core Cluster，处理器核簇）调度。本特性由QEMU在虚拟机启动阶段根据vCPU绑核关系自动推导虚拟机拓扑，并据此构建虚拟机的PPTT（Processor Physical Topology Table，处理器物理拓扑表），使虚拟机内呈现的处理器拓扑与实际绑核的物理结构一致，从而正确划分调度域，减少跨CCL调度。
 
 ### 约束与限制
 
 #### 应用限制
 
-- 安装的libvirt和qemu可能替换系统版本，可能造成其他用户或者虚拟机的异常。
-- 补丁基于openEuler社区版本，使用其他版本的qemu或libvirt可能导致异常，需要用户根据实际情况进行评估。
+- 安装的libvirt和QEMU可能替换系统版本，可能造成其他用户或者虚拟机的异常。
+- 补丁基于openEuler社区版本，使用其他版本的QEMU或libvirt可能导致异常，需要用户根据实际情况进行评估。
 - 本特性仅适用于ARM架构（aarch64）平台。
-- 本特性要求qemu基于openEuler社区qemu v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
+- 本特性要求QEMU基于openEuler社区QEMU v8.2.0版本并应用特性补丁，libvirt基于openEuler社区libvirt v9.10.0版本并应用特性补丁，补丁获取与编译安装请参见[软件编译](#软件编译)。
 - 当auto_topology='yes'且`<cputune>`中每个vCPU有且仅有一个绑定的pCPU时，才使用自动推导拓扑；条件不满足时特性降级，降级规则请参见[原理描述](#原理描述)。
 - auto_topology启用时，vCPU可能被分配在不同的NUMA（Non-Uniform Memory Access，非统一内存访问）节点上，需要用户按照实际的NUMA节点配置合适的内存绑定节点信息，且内存绑定规则需符合真实硬件结构。
 
@@ -37,8 +37,8 @@
 虚拟机拓扑灵活自动推导的整体流程如下。
 
 1. 用户在虚拟机xml中配置vCPU绑核信息（`<cputune>`），并在`<cpu>`小节中启用自动拓扑（`<topology auto_topology='yes'/>`）。
-2. libvirt在虚拟机启动阶段解析xml，当满足自动推导条件时，通过QMP（QEMU Machine Protocol，QEMU机器协议）命令`set-vcpu-pinning`将vCPU与pCPU的绑核关系传递给qemu。
-3. qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
+2. libvirt在虚拟机启动阶段解析xml，当满足自动推导条件时，通过QMP（QEMU Machine Protocol，QEMU机器协议）命令`set-vcpu-pinning`将vCPU与pCPU的绑核关系传递给QEMU。
+3. QEMU收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
 4. 虚拟机OS根据PPTT呈现的拓扑正确划分调度域，在多线程任务中减少跨CCL调度。
 
 auto_topology可与sockets、clusters、cores、threads显式拓扑配置共存，显式拓扑作为降级回退配置。
@@ -51,23 +51,23 @@ auto_topology可与sockets、clusters、cores、threads显式拓扑配置共存�
 
 ### 编译流程
 
-本特性的编译分为qemu补丁和libvirt补丁两部分，每部分均包括获取基线版本、应用补丁、编译安装三个步骤，详细操作请参见[编译代码](#编译代码)。
+本特性的编译分为QEMU补丁和libvirt补丁两部分，每部分均包括获取基线版本、应用补丁、编译安装三个步骤，详细操作请参见[编译代码](#编译代码)。
 
 ### 配置编译环境
 
 #### 环境要求
 
-本特性无特殊编译环境要求，使用qemu、libvirt开源社区默认编译环境即可。
+本特性无特殊编译环境要求，使用QEMU、libvirt开源社区默认编译环境即可。
 
 ### 编译代码
 
-#### 编译安装qemu补丁
+#### 编译安装QEMU补丁
 
-qemu基于openEuler社区的qemu v8.2.0版本。
+QEMU基于openEuler社区的QEMU v8.2.0版本。
 
 补丁地址如下。
 
-- [qemu](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
+- [QEMU](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
   - `0001-qemu-8.2.0-set-vcpu-pinning-qmp-command.patch`
   - `0002-qemu-8.2-build-pptt-auto-topology.patch`
   - `0003-hw-arm-virt-build-PPTT-vcpu-nodes-in-uniform-core-th.patch`
@@ -142,19 +142,19 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 | 软件名称 | 软件版本 | 说明 |
 | ------ | ------ | ---- |
-| qemu | openEuler社区qemu v8.2.0及以上特性补丁 | 补丁编译安装请参见[编译安装qemu补丁](#编译安装qemu补丁)。 |
+| QEMU | openEuler社区QEMU v8.2.0及以上特性补丁 | 补丁编译安装请参见[编译安装QEMU补丁](#编译安装QEMU补丁)。 |
 | libvirt | openEuler社区libvirt v9.10.0及以上特性补丁 | 补丁编译安装请参见[编译安装libvirt补丁](#编译安装libvirt补丁)。 |
 
 ### 获取软件
 
-本特性软件为qemu与libvirt特性补丁，补丁地址如下。
+本特性软件为QEMU与libvirt特性补丁，补丁地址如下。
 
-- [qemu补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
+- [QEMU补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)
 - [libvirt补丁](https://atomgit.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0)
 
 ### 部署/安装虚拟机拓扑灵活自动推导
 
-本特性无独立部署步骤，qemu与libvirt特性补丁编译安装完成后即完成部署，请参见[软件编译](#软件编译)。
+本特性无独立部署步骤，QEMU与libvirt特性补丁编译安装完成后即完成部署，请参见[软件编译](#软件编译)。
 
 ## 使用特性
 
@@ -162,7 +162,7 @@ libvirt基于openEuler社区的libvirt v9.10.0版本。
 
 libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需要完成vCPU绑核配置、自动拓扑配置和NUMA内存绑定配置。
 
-**配置vCPU绑核信息和numa绑定信息**
+**配置vCPU绑核信息和NUMA绑定信息**
 
 用户需要配置vCPU的绑核信息，以下为8C虚拟机的xml配置示例。
 
@@ -184,7 +184,7 @@ libvirt通过解析虚拟机的xml配置接收外部输入，使能本特性需�
 
 **配置自动拓扑**
 
-同时在xml的`<cpu>`小节中写入自动拓扑配置，需要同步配置numa的拓扑信息。
+同时在xml的`<cpu>`小节中写入自动拓扑配置，需要同步配置NUMA的拓扑信息。
 
 ```xml
 <domain>
@@ -235,12 +235,12 @@ auto_topology启用时，按照绑核的配置，需要用户按照实际的NUMA
 
 ### QMP接口说明
 
-qemu通过QMP命令接收libvirt传递的vCPU绑核信息。
+QEMU通过QMP命令接收libvirt传递的vCPU绑核信息。
 
 **新增QMP命令：`set-vcpu-pinning`**
 
-libvirt在虚拟机启动阶段，通过该命令将vCPU与pCPU的绑核关系传递给qemu。
-qemu收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
+libvirt在虚拟机启动阶段，通过该命令将vCPU与pCPU的绑核关系传递给QEMU。
+QEMU收到后查询宿主机pCPU的CCL/socket拓扑信息，据此构建虚拟机的PPTT。
 
 命令格式如下。
 
