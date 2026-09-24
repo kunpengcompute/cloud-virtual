@@ -17,6 +17,7 @@
 | ZRAM模块 | 提供大页内存swap后端，将swap回收冷页内存压缩存储以节省物理内存。 |
 | KAE硬件加速 | 为ZRAM压缩/解压缩操作提供硬件级加速，提升压缩效率，降低CPU占用率。 |
 | 大页内存管理工具 | 实现用户态大页内存冷热分级与主动swap回收。|
+| memlink服务 | 提供大页内存冷热打分能力，guest pagecache回收、内存碎片整理能力。 |
 | 内核大页内存swap系统 | 提供大页内存支持swap的能力。|
 
 ## 环境要求
@@ -33,13 +34,32 @@
 
 | 项目 | 版本或说明 |
 |--|--|
-| OS | `openEuler 2403 SP3` |
-| 内核源码基线 | `OLK-6.6 6.6.0-132.0.0` |
-| libvirt | `9.10.0（yum源）` |
-| qemu | `8.2.0（yum源）` |
-| redis | `6.2.0（自行安装，版本不作限制，文档以6.2.0为例）` |
-| nginx | `1.24.0（自行安装，版本不作限制，文档以1.24.0为例）` |
-| wrk | `4.1.0（自行安装，版本不作限制，文档以4.1.0为例）` |  
+| OS | openEuler 2403 LTS SP3 |
+| 内核源码基线 | OLK-6.6 6.6.0-132.0.0 |
+| libvirt | 9.10.0（yum源） |
+| qemu | 8.2.0（yum源） |
+| memlink | 1.0.0-214（yum源，以memlinkd，即memlink deamon呈现）|
+| redis | 6.2.0（自行安装，版本不作限制，文档以6.2.0为例） |
+| nginx | 1.24.0（自行安装，版本不作限制，文档以1.24.0为例） |
+| wrk | 4.1.0（自行安装，版本不作限制，文档以4.1.0为例） |
+
+## 安装软件
+
+### host软件安装
+
+安装libvirt/qemu相关软件包。
+
+    ```bash
+    yum install -y libvirt qemu edk2-aarch64 memlinkd
+    ```
+
+### 虚拟机软件安装
+
+安装redis、nginx、wrk等相关软件包。
+
+    ```bash
+    yum install -y redis nginx wrk
+    ```
 
 ## 软件编译
 
@@ -113,7 +133,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-devel-6.6.0+-1.aarch64.rpm --force
     ```
 
-5. 编辑 `/etc/grub2-efi.cfg` 文件，添加大页内存参数，大页数量根据实际环境调整。
+5. 编辑 `/etc/grub2-efi.cfg` 文件，为新安装的内核添加大页内存参数，大页数量根据实际环境调整，修改可以参考[开启内存大页](https://www.hikunpeng.com/document/detail/zh/kunpengcpfs/systuningguide/systemtg/kunpeng_shty_zn_64_005.html)。
 
     ```text
     "default_hugepagesz=2M hugepagesz=2M hugepages=131072 hugetlb_swap=on"
@@ -124,6 +144,29 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     ```bash
     reboot
     ```
+
+7. 执行以下命令分别检查内核版本信息是否为新安装的内核，以及大页数量是否与配置一致。
+
+    ```bash
+    uname -a
+    cat /proc/meminfo | grep Huge
+    ```
+
+### 升级Guest内核版本（可选）
+
+使能Guest pagecache回收能力时，需要替换Guest内核到kernel-6.6.0-145.3.27.158.20260826.b7db8e91096e.oe2403sp3.aarch64版本或以上。
+
+1. 安装新内核。
+
+   ```bash
+   yum install -y kernel-6.6.0-145.3.27.158.20260826.b7db8e91096e.oe2403sp3.aarch64
+   ```
+
+2. 重启虚机，更换新安装的内核。
+
+   ```bash
+   reboot
+   ```
 
 ### 编译安装KAE
 
@@ -138,6 +181,7 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
 2. 编译安装KAE。
 
     ```bash
+    sh build.sh cleanup
     sh build.sh all
     ```
 
@@ -148,32 +192,6 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     ```
 
     ![KAE安装成功示例](figures/zh-cn_image_0000002518691588.png)
-
-### 获取memlink工具
-
-1. 获取memlink源码。
-
-    ```bash
-    cd /home/
-    git clone https://gitcode.com/openeuler/memlinkd.git
-    ```
-
-2. 编译源码。
-
-    ```bash
-    cd memlinkd
-    yum-builddep memlinkd.spec
-    tar jcvf memlinkd.tar.bz2 --exclude=.git src
-    mkdir -p /root/rpmbuild/SOURCES/
-    cp memlinkd.tar.bz2 /root/rpmbuild/SOURCES/
-    rpmbuild -ba memlinkd.spec
-    ```
-
-3. 安装memlink SDK。
-
-    ```bash
-    cd /root/rpmbuild/RPMS/aarch64/;rpm -ivh memlinkd-*
-    ```
 
 ### 获取大页内存管理工具
 
@@ -190,24 +208,6 @@ yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git gl
     ```bash
     cd cloud-virtual/tools/
     gcc *reclaim.c -o reclaim  $(pkg-config --cflags --libs glib-2.0) -lvirt -lnuma -lmemlink_sdk -lboundscheck
-    ```
-
-## 安装软件
-
-### host软件安装
-
-安装libvirt/qemu相关软件包。
-
-    ```bash
-    yum install -y libvirt qemu edk2-aarch64
-    ```
-
-### 虚拟机软件安装
-
-安装redis、nginx、wrk等相关软件包。
-
-    ```bash
-    yum install -y redis nginx wrk
     ```
 
 ## 使用特性
@@ -230,6 +230,7 @@ echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepa
     |hugepage-ondemand|开启大页pod选项，支持大页动态分配，无此配置默认关闭。|
     |cputune|对虚拟机进行绑核。|
     |numatune|对虚拟机进行绑内存。|
+    |memballoon|配置内存气球设备，使能Guest pagecache回收（可选）。|
 
     ```xml
     <memoryBacking>
@@ -251,6 +252,12 @@ echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepa
         <cell id='0' cpus='0-1' memory='8388608' unit='KiB' memAccess='shared'/>
       </numa>
     </cpu>
+   <!--以下内容可选，用来使能Guest pagecache回收功能-->
+   <devices>
+     <memballoon model='virtio' freePageReporting='on' memop='on'>
+      <alias name='balloon0'/>
+     </memballoon>
+   </devices>
     ```
 
 2. 编辑虚拟机XML配置文件，配置虚拟机内存回收策略标签。所有虚拟机都需要配置此标签，通过标签内容区分是否允许回收。
@@ -274,7 +281,22 @@ echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepa
 
 ### 启动memlink工具
 
-1. 修改memlink配置，修改部分配置项如下。
+memlink配置参数说明如下：
+
+| 标签名 | 说明 |
+|--|--|
+|page_score_enable |大页内存冷热打分开关。|
+|page_score_poll_cycle_sec|大页内存冷热打分更新周期。|
+|pagecache_reclaim_enable|回收子系统开关。|
+|pagecache_reclaim_high_percent|pagecache 占 available 比例高水位（%）。|
+|pagecache_reclaim_step_kb|每轮回收步长（KB）。 |
+|pagecache_reclaim_poll_cycle_sec|轮询周期（秒）。 |
+|compaction_enable|内存规整子系统开关（默认关闭）。|
+|compaction_frag_high_percent|compaction_frag_high_percent=50 碎片高水位（%）。|
+|compaction_cpu_low_percent|触发规整的 vCPU 使用率上限（%）。|
+|compaction_poll_cycle_sec|轮询周期（秒）。|
+
+1. 修改memlink配置，修改部分配置项如下，使能大页内存打分。
 
     ```bash
     vim /etc/memlinkd.conf
@@ -285,7 +307,25 @@ echo 10000 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepa
     page_score_poll_cycle_sec=5
     ```
 
-2. 启动memlink工具。
+2. 使能Guest pagecache回收（可选）。
+
+   ```text
+   pagecache_reclaim_enable=1
+   pagecache_reclaim_high_percent=50
+   pagecache_reclaim_step_kb=524288
+   pagecache_reclaim_poll_cycle_sec=10
+   ```
+
+3. 使能Guest 内存碎片整理（可选）。
+
+   ```text
+   compaction_enable=1
+   compaction_frag_high_percent=50
+   compaction_cpu_low_percent=30
+   compaction_poll_cycle_sec=30
+   ```
+
+4. 启动memlink工具。
 
     ```bash
     modprobe etmem_scan
@@ -471,3 +511,9 @@ watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
 8. 在虚拟机内观测到虚拟机内存占用超过64G后，查看物理机剩余大页数量出现下降至0的情况时，观测虚拟机是否能正常使用；继续压测，虚拟机内部内存占用是否持续上升；此状态下不再保证虚拟机的性能。
 
 9. 建议在剩余大页内存数量低于大页总量10%时，挑选低压力虚拟机进行热迁移，以释放大页内存给高压力虚拟机使用，实际使用中可根据场景和需求进行调整迁移阈值，避免陷入内存不足OOM的情况。任何场景下，物理机陷入OOM情况，都无法再保证虚拟机性能。
+
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2026-09-30|第一次正式发布。|

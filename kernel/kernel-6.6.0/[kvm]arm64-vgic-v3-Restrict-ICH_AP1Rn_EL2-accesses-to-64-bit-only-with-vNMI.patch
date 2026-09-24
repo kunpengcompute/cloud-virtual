@@ -1,0 +1,153 @@
+From 8ccc4dadbe623ed7abb14ac4608ca1828c4e1909 Mon Sep 17 00:00:00 2001
+From: Jinqian Yang <yangjinqian1@huawei.com>
+Date: Tue, 1 Sep 2026 10:36:18 +0800
+Subject: [PATCH] KVM: arm64: vgic-v3: Restrict ICH_AP1Rn_EL2 accesses to
+ 64-bit only with vNMI
+
+ICH_AP1Rn_EL2 is 64-bit only when vNMI is in use, with the NMI
+priority in ICH_AP1R0_EL2[63:32]; otherwise the upper bits are RES0.
+Gate the save/restore access width on vgic_v3_vcpu_has_vnmi() which
+checks both vgic.has_nmi and ID_AA64PFR1_EL1.NMI, so that the NMI
+priority is preserved across context switch only when vNMI is
+actually enabled for the guest.
+
+Also drop the early assignment of kvm->arch.pfr1_nmi in
+kvm_arch_init_vm().  Without it vNMI is no longer enabled by default
+at VM creation on hosts with FEAT_NMI; instead the VMM must explicitly
+set ID_AA64PFR1_EL1.NMI via SET_ONE_REG to enable vNMI for the guest.
+
+Signed-off-by: Jinqian Yang <yangjinqian1@huawei.com>
+---
+ arch/arm64/include/asm/kvm_hyp.h |  1 +
+ arch/arm64/kvm/arm.c             |  3 --
+ arch/arm64/kvm/hyp/vgic-v3-sr.c  | 55 +++++++++++++++++++++++++++-----
+ 3 files changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_hyp.h b/arch/arm64/include/asm/kvm_hyp.h
+index 127ad280e68b..c4121bf0aadc 100644
+--- a/arch/arm64/include/asm/kvm_hyp.h
++++ b/arch/arm64/include/asm/kvm_hyp.h
+@@ -82,6 +82,7 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if);
+ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if);
+ void __vgic_v3_save_aprs(struct vgic_v3_cpu_if *cpu_if);
+ void __vgic_v3_restore_aprs(struct vgic_v3_cpu_if *cpu_if);
++bool vgic_v3_vcpu_has_vnmi(struct kvm_vcpu *vcpu);
+ int __vgic_v3_perform_cpuif_access(struct kvm_vcpu *vcpu);
+ 
+ #ifdef __KVM_NVHE_HYPERVISOR__
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 4d5b2e999ec6..324553fea612 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -381,9 +381,6 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ 	/* The maximum number of VCPUs is limited by the host's GIC model */
+ 	kvm->max_vcpus = kvm_arm_default_max_vcpus();
+ 
+-	if (cpus_have_const_cap(ARM64_HAS_NMI) && !static_branch_unlikely(&vgic_v3_cpuif_trap))
+-		kvm->arch.pfr1_nmi = ID_AA64PFR1_EL1_NMI_IMP;
+-
+ 	kvm_arm_init_hypercalls(kvm);
+ 
+ 	if (!kvm_is_realm(kvm))
+diff --git a/arch/arm64/kvm/hyp/vgic-v3-sr.c b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+index 7a9e132f68db..ab406332762e 100644
+--- a/arch/arm64/kvm/hyp/vgic-v3-sr.c
++++ b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+@@ -335,10 +335,40 @@ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 		write_gicreg(0, ICH_HCR_EL2);
+ }
+ 
++static struct kvm_vcpu *vgic_v3_cpu_if_to_vcpu(struct vgic_v3_cpu_if *cpu_if)
++{
++	struct vgic_cpu *vgic_cpu = container_of(cpu_if, struct vgic_cpu, vgic_v3);
++
++	return container_of(vgic_cpu, struct kvm_vcpu, arch.vgic_cpu);
++}
++
++/*
++ * vNMI is only usable if the guest has selected NMI support
++ * (vgic.has_nmi) and the vcpu has FEAT_NMI (pfr1_nmi).
++ *
++ * This drives the width of the ICH_AP1Rn_EL2 accesses: with vNMI the
++ * registers are 64bit (the NMI priority lives in ICH_AP1R0_EL2[63]),
++ * without it only the low 32 bits are valid.
++ */
++bool vgic_v3_vcpu_has_vnmi(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = kern_hyp_va(vcpu->kvm);
++
++	return kvm->arch.vgic.has_nmi &&
++	       kvm->arch.pfr1_nmi == ID_AA64PFR1_EL1_NMI_IMP;
++}
++
+ void __vgic_v3_save_aprs(struct vgic_v3_cpu_if *cpu_if)
+ {
+ 	u64 val;
+ 	u32 nr_pre_bits;
++	/*
++	 * ICH_AP1Rn_EL2 are only 64bit when the vcpu has vNMI: the NMI
++	 * priority is encoded in ICH_AP1R0_EL2[63].  Without vNMI, the
++	 * upper bits are RES0 and only the low 32 bits must be
++	 * preserved.
++	 */
++	bool vnmi = vgic_v3_vcpu_has_vnmi(vgic_v3_cpu_if_to_vcpu(cpu_if));
+ 
+ 	val = read_gicreg(ICH_VTR_EL2);
+ 	nr_pre_bits = vtr_to_nr_pre_bits(val);
+@@ -357,14 +387,18 @@ void __vgic_v3_save_aprs(struct vgic_v3_cpu_if *cpu_if)
+ 
+ 	switch (nr_pre_bits) {
+ 	case 7:
+-		cpu_if->vgic_ap1r[3] = __vgic_v3_read_ap1rn(3);
+-		cpu_if->vgic_ap1r[2] = __vgic_v3_read_ap1rn(2);
++		cpu_if->vgic_ap1r[3] = vnmi ? __vgic_v3_read_ap1rn(3)
++					    : (u32)__vgic_v3_read_ap1rn(3);
++		cpu_if->vgic_ap1r[2] = vnmi ? __vgic_v3_read_ap1rn(2)
++					    : (u32)__vgic_v3_read_ap1rn(2);
+ 		fallthrough;
+ 	case 6:
+-		cpu_if->vgic_ap1r[1] = __vgic_v3_read_ap1rn(1);
++		cpu_if->vgic_ap1r[1] = vnmi ? __vgic_v3_read_ap1rn(1)
++					    : (u32)__vgic_v3_read_ap1rn(1);
+ 		fallthrough;
+ 	default:
+-		cpu_if->vgic_ap1r[0] = __vgic_v3_read_ap1rn(0);
++		cpu_if->vgic_ap1r[0] = vnmi ? __vgic_v3_read_ap1rn(0)
++					    : (u32)__vgic_v3_read_ap1rn(0);
+ 	}
+ }
+ 
+@@ -372,6 +406,7 @@ void __vgic_v3_restore_aprs(struct vgic_v3_cpu_if *cpu_if)
+ {
+ 	u64 val;
+ 	u32 nr_pre_bits;
++	bool vnmi = vgic_v3_vcpu_has_vnmi(vgic_v3_cpu_if_to_vcpu(cpu_if));
+ 
+ 	val = read_gicreg(ICH_VTR_EL2);
+ 	nr_pre_bits = vtr_to_nr_pre_bits(val);
+@@ -390,14 +425,18 @@ void __vgic_v3_restore_aprs(struct vgic_v3_cpu_if *cpu_if)
+ 
+ 	switch (nr_pre_bits) {
+ 	case 7:
+-		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[3], 3);
+-		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[2], 2);
++		__vgic_v3_write_ap1rn(vnmi ? cpu_if->vgic_ap1r[3]
++					   : (u32)cpu_if->vgic_ap1r[3], 3);
++		__vgic_v3_write_ap1rn(vnmi ? cpu_if->vgic_ap1r[2]
++					   : (u32)cpu_if->vgic_ap1r[2], 2);
+ 		fallthrough;
+ 	case 6:
+-		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[1], 1);
++		__vgic_v3_write_ap1rn(vnmi ? cpu_if->vgic_ap1r[1]
++					   : (u32)cpu_if->vgic_ap1r[1], 1);
+ 		fallthrough;
+ 	default:
+-		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[0], 0);
++		__vgic_v3_write_ap1rn(vnmi ? cpu_if->vgic_ap1r[0]
++					   : (u32)cpu_if->vgic_ap1r[0], 0);
+ 	}
+ }
+ 
+-- 
+GitCode
+
