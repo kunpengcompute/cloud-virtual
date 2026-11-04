@@ -1,5 +1,7 @@
 # 鲲鹏920跨代热迁移 用户指南
 
+本文档介绍由鲲鹏920服务器向鲲鹏920新型号服务器的虚拟机单向跨代热迁移，涵盖BIOS配置、内核与QEMU编译安装、网桥搭建及热迁移功能与性能测试，适用于在openEuler 24.03 LTS SP1系统上执行跨代热迁移的运维人员。
+
 ## 特性描述<a name="ZH-CN_TOPIC_0000002549771341"></a>
 
 ### 简介<a name="ZH-CN_TOPIC_0000002549891359"></a>
@@ -67,10 +69,10 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 |项目|版本|获取方法|
 |--|--|--|
-|OS|openEuler 24.03 LTS SP1|[获取链接](https://dl-cdn.openeuler.openatom.cn/openEuler-24.03-LTS-SP1/ISO/aarch64/openEuler-24.03-LTS-SP1-aarch64-dvd.iso)|
-|内核|6.6.0-72|源码：[获取链接](https://gitcode.com/openeuler/kernel/tree/6.6.0-72.0.0)<br>补丁：[获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0)|
+|OS|openEuler 24.03 LTS SP1|[openEuler 24.03 LTS SP1 ISO镜像](https://dl-cdn.openeuler.openatom.cn/openEuler-24.03-LTS-SP1/ISO/aarch64/openEuler-24.03-LTS-SP1-aarch64-dvd.iso)|
+|内核|6.6.0-72|源码：[kernel源码仓库（6.6.0-72.0.0分支）](https://gitcode.com/openeuler/kernel/tree/6.6.0-72.0.0)<br>补丁：[kernel补丁仓库（kernel-6.6.0）](https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0)|
 |Libvirt|9.10.0|yum源安装|
-|QEMU|8.2.0|源码：[获取链接](https://gitcode.com/openeuler/qemu/tree/qemu-8.2.0)<br>补丁：[获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)|
+|QEMU|8.2.0|源码：[QEMU源码仓库（qemu-8.2.0分支）](https://gitcode.com/openeuler/qemu/tree/qemu-8.2.0)<br>补丁：[QEMU补丁仓库（qemu-8.2.0）](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)|
 |Redis|6.2.7|yum源安装|
 |Nginx|1.24.0|yum源安装|
 |Perf|6.6.0-89.0.0.94|yum源安装|
@@ -84,7 +86,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 1. 重启源端物理机，并进入BIOS界面。
 2. 设置“Advanced \> Performance Config \> SSBS Support”下的“SSBS Support”为“Enabled”。
 
-    ![](figures/zh-cn_image_0000002549771353.png)
+    ![BIOS的Advanced > Performance Config页面，将SSBS Support选项设置为Enabled的位置](figures/zh-cn_image_0000002549771353.png)
 
 #### 配置目的端BIOS<a name="ZH-CN_TOPIC_0000002518411502"></a>
 
@@ -93,11 +95,11 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 1. 重启目的端物理机，并进入BIOS界面。
 2. 设置“Advanced \> Processor Configuration \> GIC Version”下的“GIC Version”为“4.0”。
 
-    ![](figures/zh-cn_image_0000002518411512.png)
+    ![BIOS的Advanced > Processor Configuration页面，将GIC Version选项设置为4.0的位置](figures/zh-cn_image_0000002518411512.png)
 
 3. 设置“Advanced \> MISC Configuration \> SysCount Frequency”下的“SysCount Frequency”为“100MHz”。
 
-    ![](figures/zh-cn_image_0000002518251602.png)
+    ![BIOS的Advanced > MISC Configuration页面，将SysCount Frequency选项设置为100MHz的位置](figures/zh-cn_image_0000002518251602.png)
 
 ### 编译安装服务器内核<a name="ZH-CN_TOPIC_0000002518251594"></a>
 
@@ -111,7 +113,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 1. 安装内核编译需要的相关依赖包。
 
-    ```shell
+    ```conf
     yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build
     ```
 
@@ -173,9 +175,9 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
     为新安装内核的启动参数增加如下内容：
 
-    ![](figures/zh-cn_image_0000002549771349.png)
+    ![grub.cfg中新内核启动参数行，已添加arm64.nopauth、iommu.passthrough等选项](figures/zh-cn_image_0000002549771349.png)
 
-    ```xml
+    ```text
     arm64.nopauth console=tty0 selinux=0 iommu.passthrough=1 pci=realloc
     ```
 
@@ -186,7 +188,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
     grub2-editenv list
     ```
 
-    ![](figures/zh-cn_image_0000002518251600.png)
+    ![grub2-editenv list命令回显，显示默认启动内核为openEuler (6.6.0+) 24.03 (LTS-SP1)](figures/zh-cn_image_0000002518251600.png)
 
 9. 重启系统并进入BMC切换到新的内核。
 
@@ -282,7 +284,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
 1. 修改目的端“/etc/libvirt/libvirtd.conf”相关配置，以允许Libvirt在虚拟机热迁移过程中监控虚拟机的状态。
 
-    ```xml
+    ```conf
     listen_tls = 0
     listen_tcp = 1
     tcp_port = "16509"
@@ -346,7 +348,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
     若绑定成功，回显如下：
 
-    ![](figures/zh-cn_image_0000002549891365.png)
+    ![brctl show命令回显，列出新建的网桥名称及其绑定的物理网卡接口](figures/zh-cn_image_0000002549891365.png)
 
     >![](public_sys-resources/icon-notice.gif) **须知：** 
     >需要安装bridge-utils。
@@ -481,15 +483,15 @@ yum install -y perf
 
 7. 观察迁移过程能否正常执行结束，进度条到达100%后正常结束，无报错信息。
 
-    ![](figures/zh-cn_image_0000002549771351.png)
+    ![功能测试中virsh migrate热迁移过程的终端回显，进度条到达100%后正常结束](figures/zh-cn_image_0000002549771351.png)
 
 8. 迁移完成后，在目的端物理机进入虚拟机，并执行Ctrl + C打断perf采集过程，查看perf程序是否正常输出如下结果。
 
-    ![](figures/zh-cn_image_0000002549891367.png)
+    ![迁移完成后perf stat采集结果的回显，列出各性能事件计数与统计时长](figures/zh-cn_image_0000002549891367.png)
 
 9. 迁移完成后，在客户端物理机检查压测能否正常完成，输出最终的rps（requests per second）结果。
 
-    ![](figures/zh-cn_image_0000002518411510.png)
+    ![redis-benchmark压测完成后的rps输出回显，显示最终每秒请求数](figures/zh-cn_image_0000002518411510.png)
 
 ### 性能测试<a name="ZH-CN_TOPIC_0000002518411508"></a>
 
@@ -519,7 +521,7 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
     如果出现类似的界面，则说明wrk安装成功。
 
-    ![](figures/zh-cn_image_0000002518411516.png)
+    ![wrk -v命令回显，显示wrk版本号以确认安装成功](figures/zh-cn_image_0000002518411516.png)
 
 **热迁移性能测试<a name="section656254144515"></a>**
 
@@ -587,21 +589,21 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 7. 观察迁移过程能否正常执行结束，进度条到达100%后正常结束，无报错信息。
 
-    ![](figures/zh-cn_image_0000002549771357.png)
+    ![性能测试中wrk加压与ping并行时virsh migrate的迁移进度与完成回显](figures/zh-cn_image_0000002549771357.png)
 
 8. 迁移完成后，在客户端物理机检查压测能否正常完成，输出最终的rps（requests per second）结果。
 
-    ![](figures/zh-cn_image_0000002518251606.png)
+    ![wrk压测完成后的rps结果回显，显示每秒请求数与延迟统计](figures/zh-cn_image_0000002518251606.png)
 
 9. 迁移完成后中断ping测试，观察丢包数量是否小于20个。
 
-    ![](figures/zh-cn_image_0000002549891371.png)
+    ![中断ping测试后的统计回显，显示发送、接收与丢包数量](figures/zh-cn_image_0000002549891371.png)
 
 **注意事项<a name="section848012533393"></a>**
 
 - 迁移测试中，会偶发虚拟机磁盘镜像损坏问题。迁移成功后，使用虚拟机的过程中，将出现类似如下内容的报错信息。
 
-    ![](figures/zh-cn_image_0000002518411514.png)
+    ![虚拟机磁盘镜像损坏时在虚拟机内出现的系统报错信息回显](figures/zh-cn_image_0000002518411514.png)
 
     可通过以下步骤进行修复。
 
@@ -611,11 +613,11 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 - 迁移完成后，虚拟机内部显示CPU频率为源端物理机的频率，无法与目的端物理机保持一致，但根据CPU单核性能测试结果，该问题仅为显示问题，不会影响虚拟机CPU性能。
 
-    ![](figures/zh-cn_image_0000002549771355.png)
+    ![虚拟机内查看CPU频率的界面截图，显示的频率与源端物理机一致](figures/zh-cn_image_0000002549771355.png)
 
 - QEMU编译过程中，可能会出现如下所示的变量未定义错误。
 
-    ![](figures/zh-cn_image_0000002518251604.png)
+    ![QEMU编译过程中变量未定义的报错信息回显](figures/zh-cn_image_0000002518251604.png)
 
     可通过以下步骤进行修复。
 

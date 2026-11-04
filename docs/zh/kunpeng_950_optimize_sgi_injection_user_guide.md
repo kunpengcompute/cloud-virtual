@@ -1,5 +1,7 @@
 # SGI注入亲和性优化 用户指南
 
+本文档介绍鲲鹏950服务器上SGI注入亲和性优化特性的部署与使用，通过在VM首次运行时预计算MPIDR到vCPU索引的压缩映射表，将SGI分发路径从O(n)遍历优化为O(1)直接查找，适用于需要在鲲鹏950服务器上启用该优化特性的用户。
+
 ## 介绍
 
 ### 简介
@@ -70,8 +72,8 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 2. 期望输出。
 
-   ```text
-   OLK-6.6
+   ```output
+      OLK-6.6
    ```
 
 ### 合入补丁
@@ -93,7 +95,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
    期望最新一条提交类似如下。
 
-   ```text
+   ```output
    <newest> KVM: arm64: vgic-v3: Optimize affinity-based SGI injection
    ```
 
@@ -164,7 +166,7 @@ make binrpm-pkg -j$(nproc)
 2. 启动虚拟机。
 
    ```bash
-   virsh start <vm name> --console
+   virsh start <虚拟机名称> --console
    ```
 
 3. 在虚拟机内触发SGI（如通过`ipistat`或内核调度活动），观察SGI投递延迟是否降低。
@@ -175,3 +177,10 @@ make binrpm-pkg -j$(nproc)
 
 * 本特性仅影响KVM宿主机侧的SGI分发路径，不改变Guest可见行为，对Guest操作系统透明。
 * 当GICv4.1硬件IPIv启用时，Guest的SGI由硬件直接处理，不经过KVM软件路径，本优化不会生效。
+
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2026-06-30|第一次正式发布。|
+

@@ -1,5 +1,7 @@
 # VF设备选择ITS 用户指南
 
+本文档介绍在鲲鹏950服务器上部署和使用VF设备选择ITS新特性的方法，说明如何通过PF级sysfs接口为PF配置一组VF可使用的ITS设备并验证配置是否生效，适用于需要在鲲鹏950服务器上使用该特性的用户。
+
 ## 介绍
 
 ### 简介
@@ -57,7 +59,7 @@ VF ITS新特性使用PF设备路径下的sysfs节点：
 | 项目 | 说明 |
 |--|--|
 | 处理器 | 鲲鹏950处理器 |
-| PCIe设备 | NVME盘或PCIE网卡 |
+| PCIe设备 | NVMe盘或PCIe网卡 |
 
 **软件要求**
 
@@ -96,7 +98,7 @@ git branch --show-current
 
 期望输出：
 
-```text
+```output
 OLK-6.6
 ```
 
@@ -300,7 +302,7 @@ lspci -nn | grep -E "${PF_BDF#0000:}|Virtual Function"
 ```
 
 **注意事项**
-1、NVME盘VF设备创建，需要参考NVME盘驱动的VF设备创建指南。
+1. NVMe盘VF设备创建，需要参考NVMe盘驱动的VF设备创建指南。
 
 ### 查看运行日志
 
@@ -312,7 +314,7 @@ dmesg | grep -E 'VF ITS|VF uses ITS raw index|sriov_vf_its_indices|ITS raw index
 
 当VF成功解析到目标ITS时，常见日志形态类似：
 
-```text
+```output
 VF uses ITS raw index <n> base <base_addr>
 ```
 
@@ -486,3 +488,10 @@ PF已显式配置`sriov_vf_its_indices`时，VF运行时必须解析到合法的
 | PF | Physical Function | SR-IOV中的物理功能。 |
 | SR-IOV | Single Root I/O Virtualization | 单根I/O虚拟化技术。 |
 | VF | Virtual Function | SR-IOV中由PF创建的虚拟功能。 |
+
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2026-06-30|第一次正式发布。|
+

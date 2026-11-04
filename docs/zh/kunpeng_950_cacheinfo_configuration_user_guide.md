@@ -1,5 +1,7 @@
 # 虚拟机缓存信息配置 用户指南
 
+本文档介绍虚拟机缓存信息配置方法，涵盖获取并合入cacheinfo补丁、编译qemu和libvirt、通过libvirt XML配置缓存信息以及验证配置结果，适用于需要为虚拟机透传缓存信息的用户。
+
 ## 功能介绍
 
 本功能通过虚拟机用户设置虚拟机缓存信息，向虚拟机中透传详细缓存信息，使得虚拟机OS内核能够正确识别CCL级别调度域，改善内核调度效率。
@@ -20,7 +22,7 @@
 |--|--|
 | OS | openEuler 2403 SP3 |
 | qemu | 8.2.0 |
-| libvirt | 9.1.0 |
+| libvirt | 9.10.0 |
 
 ## 软件编译
 
@@ -30,8 +32,8 @@
 
     | 项目 | 补丁链接 |
     |--|--|
-    | qemu | [获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0) |
-    | libvirt | [获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0) |
+    | qemu | [获取qemu补丁链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0) |
+    | libvirt | [获取libvirt补丁链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/libvirt/libvirt-9.10.0) |
 
 2. libvirt需要获取以下11个补丁文件，并保持应用顺序不变。
 
@@ -220,7 +222,7 @@
 
     期望输出类似。
 
-    ```text
+    ```output
     index0  index1  index2  index3
     ```
 
@@ -279,3 +281,10 @@
 * guest OS的内核配置需打开相关调度域功能开关。
 * 下一级缓存存在时，上一级缓存必须存在，否则虚拟机启动时会报错并停止。
 * 若使用的qemu不支持缓存信息参数，将触发默认报错机制并停止虚拟机启动。
+
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2026-06-30|第一次正式发布。|
+
