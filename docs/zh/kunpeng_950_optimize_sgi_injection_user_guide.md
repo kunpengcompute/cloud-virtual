@@ -18,9 +18,9 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 | 模块 | 功能 |
 |--|--|
-| MPIDR映射初始化（`kvm_init_mpidr_data`） | 在VM首次运行时，分析所有vCPU的MPIDR亲和性，提取差异位构造压缩映射表，存入`kvm->arch.mpidr_data`。 |
-| 快速查找（`kvm_mpidr_index` / `kvm_mpidr_to_vcpu`） | 利用压缩映射表，将MPIDR亲和性直接转换为vCPU索引，无需遍历。 |
-| SGI分发路径优化（`vgic_v3_dispatch_sgi`） | 重写SGI分发逻辑，将原来的全量遍历改为按目标位图逐个直接查找，并提取`vgic_v3_queue_sgi`辅助函数。 |
+| MPIDR映射初始化（kvm_init_mpidr_data） | 在VM首次运行时，分析所有vCPU的MPIDR亲和性，提取差异位构造压缩映射表，存入kvm->arch.mpidr_data。 |
+| 快速查找（kvm_mpidr_index / kvm_mpidr_to_vcpu） | 利用压缩映射表，将MPIDR亲和性直接转换为vCPU索引，无需遍历。 |
+| SGI分发路径优化（vgic_v3_dispatch_sgi） | 重写SGI分发逻辑，将原来的全量遍历改为按目标位图逐个直接查找，并提取vgic_v3_queue_sgi辅助函数。 |
 
 典型流程如下。
 
@@ -43,8 +43,8 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 | 项目 | 版本或说明                    |
 |--|--------------------------|
-| OS | `openEuler 2403 LTS SP3` |
-| 内核源码基线 | `OLK-6.6 6.6.0-135.0.0`  |
+| OS | openEuler 2403 LTS SP3 |
+| 内核源码基线 | OLK-6.6 6.6.0-135.0.0  |
 
 ## 获取并合入SGI优化补丁
 
@@ -73,7 +73,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 2. 期望输出。
 
    ```output
-      OLK-6.6
+  OLK-6.6
    ```
 
 ### 合入补丁
