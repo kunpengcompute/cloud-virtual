@@ -1,10 +1,12 @@
 # 鲲鹏920跨代热迁移 用户指南
 
+本文档介绍由鲲鹏920处理器向鲲鹏920新型号处理器的虚拟机单向跨代热迁移，涵盖BIOS配置、内核与QEMU编译安装、网桥搭建及热迁移功能与性能测试，适用于在openEuler 24.03 LTS SP1系统上执行跨代热迁移的运维人员。
+
 ## 特性描述<a name="ZH-CN_TOPIC_0000002549771341"></a>
 
 ### 简介<a name="ZH-CN_TOPIC_0000002549891359"></a>
 
-本文主要介绍如何在使用openEuler操作系统的鲲鹏服务器上，执行由鲲鹏920服务器向鲲鹏920新型号服务器的虚拟机单向跨代热迁移。
+本文主要介绍如何在使用openEuler操作系统的鲲鹏服务器上，执行由鲲鹏920处理器向鲲鹏920新型号处理器的虚拟机单向跨代热迁移。
 
 虚拟机热迁移（Live Migration）是一种在不中断虚拟机运行的情况下，将虚拟机从一个物理主机迁移到另一个物理主机的技术。跨代热迁移技术的核心优势是支持在不同代的硬件之间迁移虚拟机，从而在硬件升级迭代过程中不影响虚拟机的运行状态和业务连续性。在实践中，跨代热迁移通常要求目标和源硬件支持一定程度的兼容性，同时虚拟机的操作系统和应用也需要能够容忍一定的硬件差异。因此，尽管技术上较为复杂，但它为数据中心和云服务提供了更强的灵活性和业务不中断的保障。
 
@@ -67,10 +69,10 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 |项目|版本|获取方法|
 |--|--|--|
-|OS|openEuler 24.03 LTS SP1|[获取链接](https://dl-cdn.openeuler.openatom.cn/openEuler-24.03-LTS-SP1/ISO/aarch64/openEuler-24.03-LTS-SP1-aarch64-dvd.iso)|
-|内核|6.6.0-72|源码：[获取链接](https://gitcode.com/openeuler/kernel/tree/6.6.0-72.0.0)<br>补丁：[获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0)|
+|OS|openEuler 24.03 LTS SP1|[openEuler 24.03 LTS SP1 ISO镜像](https://dl-cdn.openeuler.openatom.cn/openEuler-24.03-LTS-SP1/ISO/aarch64/openEuler-24.03-LTS-SP1-aarch64-dvd.iso)|
+|内核|6.6.0-72|源码：[kernel源码仓库（6.6.0-72.0.0分支）](https://gitcode.com/openeuler/kernel/tree/6.6.0-72.0.0)<br>补丁：[kernel补丁仓库（kernel-6.6.0）](https://gitcode.com/boostkit/cloud-virtual/tree/master/kernel/kernel-6.6.0)|
 |Libvirt|9.10.0|yum源安装|
-|QEMU|8.2.0|源码：[获取链接](https://gitcode.com/openeuler/qemu/tree/qemu-8.2.0)<br>补丁：[获取链接](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)|
+|QEMU|8.2.0|源码：[QEMU源码仓库（qemu-8.2.0分支）](https://gitcode.com/openeuler/qemu/tree/qemu-8.2.0)<br>补丁：[QEMU补丁仓库（qemu-8.2.0）](https://gitcode.com/boostkit/cloud-virtual/tree/master/qemu/qemu-8.2.0)|
 |Redis|6.2.7|yum源安装|
 |Nginx|1.24.0|yum源安装|
 |Perf|6.6.0-89.0.0.94|yum源安装|
@@ -84,7 +86,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 1. 重启源端物理机，并进入BIOS界面。
 2. 设置“Advanced \> Performance Config \> SSBS Support”下的“SSBS Support”为“Enabled”。
 
-    ![](figures/zh-cn_image_0000002549771353.png)
+    ![BIOS的Advanced > Performance Config页面，将SSBS Support选项设置为Enabled的位置](figures/zh-cn_image_0000002549771353.png)
 
 #### 配置目的端BIOS<a name="ZH-CN_TOPIC_0000002518411502"></a>
 
@@ -93,11 +95,11 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 1. 重启目的端物理机，并进入BIOS界面。
 2. 设置“Advanced \> Processor Configuration \> GIC Version”下的“GIC Version”为“4.0”。
 
-    ![](figures/zh-cn_image_0000002518411512.png)
+    ![BIOS的Advanced > Processor Configuration页面，将GIC Version选项设置为4.0的位置](figures/zh-cn_image_0000002518411512.png)
 
 3. 设置“Advanced \> MISC Configuration \> SysCount Frequency”下的“SysCount Frequency”为“100MHz”。
 
-    ![](figures/zh-cn_image_0000002518251602.png)
+    ![BIOS的Advanced > MISC Configuration页面，将SysCount Frequency选项设置为100MHz的位置](figures/zh-cn_image_0000002518251602.png)
 
 ### 编译安装服务器内核<a name="ZH-CN_TOPIC_0000002518251594"></a>
 
@@ -111,13 +113,13 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 1. 安装内核编译需要的相关依赖包。
 
-    ```shell
+    ```bash
     yum -y install rpm-build openssl-devel bc rsync gcc gcc-c++ flex bison m4 git glib2-devel spice-protocol zlib-devel libffi-devel libgcrypt-devel libnfs-devel libiscsi-devel libseccomp-devel libaio-devel libcap-ng-devel librados2-devel librbd1-devel libfdt-devel libpng-devel spice-server-devel numactl-devel dwarves elfutils-libelf-devel ncurses-devel cmake make liburing-devel ninja-build
     ```
 
 2. 获取开源版本内核源码并进入tag6.6.0-72.0.0。
 
-    ```shell
+    ```bash
     cd /home
     git clone https://gitee.com/openeuler/kernel.git
     cd kernel
@@ -127,7 +129,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 3. 获取内核补丁并将补丁文件应用至开源版本代码。
 
-    ```shell
+    ```bash
     cd /home
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     cp /home/boostkit_-virtualization/tools/[live-migration]apply_patches.py /home/kernel/
@@ -137,7 +139,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 4. 复制当前系统配置文件作为编译配置文件，并做如下修改。
 
-    ```shell
+    ```bash
     cp /boot/config-6.6.0-72.0.0.76.oe2403sp1.aarch64 .config
     vim .config
     CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -145,13 +147,13 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 5. 生成编译配置，执行成功后直接exit。
 
-    ```shell
+    ```bash
     make menuconfig
     ```
 
 6. 编译内核。
 
-    ```shell
+    ```bash
     make binrpm-pkg -j
     ```
 
@@ -160,37 +162,37 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
     >![](public_sys-resources/icon-note.gif) **说明：** 
     >编译生成的RPM包所在的路径需要根据实际情况替换。
 
-    ```shell
+    ```bash
     rpm -ivh /root/rpmbuild/RPMS/aarch64/kernel-6.6.0-1.aarch64.rpm --force
     grub2-mkconfig -o /boot/efi/EFI/openEuler/grub.cfg
     ```
 
 8. 修改内核启动参数。
 
-    ```shell
+    ```bash
     vi /boot/efi/EFI/openEuler/grub.cfg
     ```
 
     为新安装内核的启动参数增加如下内容：
 
-    ![](figures/zh-cn_image_0000002549771349.png)
+    ![grub.cfg中新内核启动参数行，已添加arm64.nopauth、iommu.passthrough等选项](figures/zh-cn_image_0000002549771349.png)
 
-    ```xml
+    ```text
     arm64.nopauth console=tty0 selinux=0 iommu.passthrough=1 pci=realloc
     ```
 
     设置新内核为默认启动内核，并检查是否设置成功：
 
-    ```shell
+    ```bash
     grub2-set-default "openEuler (6.6.0+) 24.03 (LTS-SP1)"
     grub2-editenv list
     ```
 
-    ![](figures/zh-cn_image_0000002518251600.png)
+    ![grub2-editenv list命令回显，显示默认启动内核为openEuler (6.6.0+) 24.03 (LTS-SP1)](figures/zh-cn_image_0000002518251600.png)
 
 9. 重启系统并进入BMC切换到新的内核。
 
-    ```shell
+    ```bash
     reboot
     ```
 
@@ -200,7 +202,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 1. 获取开源版本QEMU源码，并进入qemu-8.2.0分支。
 
-    ```shell
+    ```bash
     cd /home
     git clone https://gitee.com/openeuler/qemu.git
     cd qemu
@@ -210,7 +212,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 2. 获取QEMU补丁并将补丁文件应用至开源版本代码。
 
-    ```shell
+    ```bash
     cd /home
     git clone https://gitee.com/kunpeng_compute/boostkit_-virtualization.git
     cp /home/boostkit_-virtualization/tools/[live-migration]apply_patches.py /home/qemu/
@@ -220,7 +222,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 3. 配置QEMU编译选项。
 
-    ```shell
+    ```bash
     mkdir build
     cd build
     ../configure --prefix=/usr/local/qemu-8.2.0 --disable-werror --enable-spice --enable-spice-protocol --target-list=aarch64-softmmu --cc="gcc" --extra-cflags="-Wno-error" --disable-docs --enable-virtfs --enable-numa --enable-kvm
@@ -228,7 +230,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 4. 编译并安装QEMU，如出现编译失败的情况，参见文档末尾的注意事项。
 
-    ```shell
+    ```bash
     make -j && make install
     ```
 
@@ -236,7 +238,7 @@ iBMC和BIOS版本要求如[**表 2** iBMC和BIOS版本要求](#iBMC和BIOS版本
 
 源端与目的端服务器均使用yum安装Libvirt即可。
 
-```shell
+```bash
 yum -y install libvirt edk2-aarch64.noarch
 ```
 
@@ -251,25 +253,25 @@ yum -y install libvirt edk2-aarch64.noarch
 
 1. 关闭源端与目的端物理机的SELinux特性，在“/etc/selinux/config”文件中做如下修改，并重启。
 
-    ```shell
+    ```bash
     SELINUX=disabled
     ```
 
 2. 关闭目的端物理机防火墙。
 
-    ```shell
+    ```bash
     systemctl stop firewalld
     ```
 
 3. 修改目的端物理机主机名。
 
-    ```shell
+    ```bash
     hostname target
     ```
 
 4. 修改源端物理机“/etc/hosts”文件，添加目的端物理机IP地址与主机名，IP地址与迁移命令使用的IP保持一致。
 
-    ```shell
+    ```bash
     XXX.XXX.XXX.XXX target
     ```
 
@@ -282,7 +284,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
 1. 修改目的端“/etc/libvirt/libvirtd.conf”相关配置，以允许Libvirt在虚拟机热迁移过程中监控虚拟机的状态。
 
-    ```xml
+    ```conf
     listen_tls = 0
     listen_tcp = 1
     tcp_port = "16509"
@@ -313,7 +315,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
 1. 创建网桥接口。
 
-    ```shell
+    ```bash
     brctl addbr <网桥名>
     ```
 
@@ -321,39 +323,39 @@ yum -y install libvirt edk2-aarch64.noarch
 
     若是网卡存在IP地址，需要清除IP地址。
 
-    ```shell
+    ```bash
     ip addr flush dev <网卡名>
     ```
 
     执行以下命令，将网卡绑在网桥上。
 
-    ```shell
+    ```bash
     ip link set <网卡名> master <网桥名>
     ```
 
 3. 启动接口。
 
-    ```shell
+    ```bash
     sudo ip link set <网桥名> up
     sudo ip link set <网卡名> up
     ```
 
 4. 查看是否绑定成功。
 
-    ```shell
+    ```bash
     brctl show
     ```
 
     若绑定成功，回显如下：
 
-    ![](figures/zh-cn_image_0000002549891365.png)
+    ![brctl show命令回显，列出新建的网桥名称及其绑定的物理网卡接口](figures/zh-cn_image_0000002549891365.png)
 
     >![](public_sys-resources/icon-notice.gif) **须知：** 
     >需要安装bridge-utils。
 
 5. 配置网桥的IP地址与网关。
 
-    ```shell
+    ```bash
     ip addr add <IP地址> dev <网桥名>
     ip route add default via <网关IP地址> dev <网桥名>
     ```
@@ -372,7 +374,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
     IP地址配置命令如下：
 
-    ```shell
+    ```bash
     ip addr add <IP地址> dev <虚拟网卡名>
     ```
 
@@ -380,7 +382,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
     在目标物理机中，执行以下命令查看虚拟机网络是否畅通，若能成功连接网络，则说明网络搭建成功。
 
-    ```shell
+    ```bash
     ping <虚拟网卡IP地址>
     ```
 
@@ -390,7 +392,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
 1. 编辑源端虚拟机xml。
 
-    ```shell
+    ```bash
     virsh edit <虚拟机名称>
     ```
 
@@ -423,7 +425,7 @@ yum -y install libvirt edk2-aarch64.noarch
 
 Redis只作为验证热迁移过程中业务连续性的工具，Redis的版本可任意选择，以6.2.7为例，该版本为yum源自带版本，在虚拟机中执行以下命令安装。
 
-```shell
+```bash
 yum install -y redis6
 ```
 
@@ -431,7 +433,7 @@ yum install -y redis6
 
 Perf是一款系统性能分析工具软件，作为验证虚拟机PMU事件热迁移的工具，直接使用yum源自带版本，在虚拟机中执行以下命令安装。
 
-```shell
+```bash
 yum install -y perf
 ```
 
@@ -442,13 +444,13 @@ yum install -y perf
 
 1. 启动源端虚拟机。
 
-    ```shell
+    ```bash
     virsh start <虚拟机名称> --console
     ```
 
 2. 修改Redis配置文件“/etc/redis/redis.conf”。
 
-    ```shell
+    ```bash
     bind <虚拟机网卡IP>
     protected-mode no
     daemonize no
@@ -456,40 +458,40 @@ yum install -y perf
 
 3. 关闭虚拟机防火墙，启动Redis。
 
-    ```shell
+    ```bash
     systemctl stop firewalld
     systemctl start redis
     ```
 
 4. 开启PMU事件采集，事件数量与类型可根据芯片支持情况自定义，以采集10个事件举例。
 
-    ```shell
+    ```bash
     perf stat -e branches,branch-misses,cache-misses,cache-references,cycles,instructions,alignment-faults,bpf-output,cgroup-switches,cpu-clock
     ```
 
 5. Redis客户端加压。
 
-    ```shell
+    ```bash
     redis-benchmark -h <虚拟机IP地址> -n 10000000 -c 1000 -r 10000000  -t get -p 6379 --threads 20
     ```
 
 6. 源端物理机执行虚拟机热迁移操作。
 
-    ```shell
+    ```bash
     virsh migrate --verbose --persistent --live --unsafe <虚拟机名称> qemu+tcp://<目的端物理机IP地址>/system
     ```
 
 7. 观察迁移过程能否正常执行结束，进度条到达100%后正常结束，无报错信息。
 
-    ![](figures/zh-cn_image_0000002549771351.png)
+    ![功能测试中virsh migrate热迁移过程的终端回显，进度条到达100%后正常结束](figures/zh-cn_image_0000002549771351.png)
 
 8. 迁移完成后，在目的端物理机进入虚拟机，并执行Ctrl + C打断perf采集过程，查看perf程序是否正常输出如下结果。
 
-    ![](figures/zh-cn_image_0000002549891367.png)
+    ![迁移完成后perf stat采集结果的回显，列出各性能事件计数与统计时长](figures/zh-cn_image_0000002549891367.png)
 
 9. 迁移完成后，在客户端物理机检查压测能否正常完成，输出最终的rps（requests per second）结果。
 
-    ![](figures/zh-cn_image_0000002518411510.png)
+    ![redis-benchmark压测完成后的rps输出回显，显示最终每秒请求数](figures/zh-cn_image_0000002518411510.png)
 
 ### 性能测试<a name="ZH-CN_TOPIC_0000002518411508"></a>
 
@@ -497,7 +499,7 @@ yum install -y perf
 
 Nginx只作为验证热迁移过程中业务连续性的工具，Nginx的版本可任意选择，以1.24.0为例，该版本为yum源自带版本，在虚拟机中使用以下命令直接安装。
 
-```shell
+```bash
 yum install -y nginx
 ```
 
@@ -507,19 +509,19 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 1. 客户端物理机安装wrk-4.2.0。
 
-    ```shell
+    ```bash
     yum install wrk
     ```
 
 2. 完成后执行以下指令：
 
-    ```shell
+    ```bash
     wrk -v
     ```
 
     如果出现类似的界面，则说明wrk安装成功。
 
-    ![](figures/zh-cn_image_0000002518411516.png)
+    ![wrk -v命令回显，显示wrk版本号以确认安装成功](figures/zh-cn_image_0000002518411516.png)
 
 **热迁移性能测试<a name="section656254144515"></a>**
 
@@ -528,13 +530,13 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 1. 启动源端虚拟机。
 
-    ```shell
+    ```bash
     virsh start <虚拟机名称> --console
     ```
 
 2. 生成测试用自签名证书。
 
-    ```shell
+    ```bash
     mkdir -p /etc/nginx/ssl
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
       -keyout /etc/nginx/ssl/server.key \
@@ -566,7 +568,7 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 4. 关闭虚拟机防火墙，启动Nginx。
 
-    ```shell
+    ```bash
     systemctl stop firewalld
     setenforce 0
     systemctl start nginx
@@ -574,34 +576,34 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 5. Nginx客户端加压，并开启ping测试。
 
-    ```shell
+    ```bash
     wrk -H "Connection: Close" -c 800 -t 100 -d 120s https://<虚拟机IP地址>:20000/index.html
     ping -i 0.01 <虚拟机IP地址>
     ```
 
 6. 源端物理机执行虚拟机热迁移操作。
 
-    ```shell
+    ```bash
     virsh migrate --verbose --persistent --live --unsafe <虚拟机名称> qemu+tcp://<目的端物理机IP地址>/system
     ```
 
 7. 观察迁移过程能否正常执行结束，进度条到达100%后正常结束，无报错信息。
 
-    ![](figures/zh-cn_image_0000002549771357.png)
+    ![性能测试中wrk加压与ping并行时virsh migrate的迁移进度与完成回显](figures/zh-cn_image_0000002549771357.png)
 
 8. 迁移完成后，在客户端物理机检查压测能否正常完成，输出最终的rps（requests per second）结果。
 
-    ![](figures/zh-cn_image_0000002518251606.png)
+    ![wrk压测完成后的rps结果回显，显示每秒请求数与延迟统计](figures/zh-cn_image_0000002518251606.png)
 
 9. 迁移完成后中断ping测试，观察丢包数量是否小于20个。
 
-    ![](figures/zh-cn_image_0000002549891371.png)
+    ![中断ping测试后的统计回显，显示发送、接收与丢包数量](figures/zh-cn_image_0000002549891371.png)
 
 **注意事项<a name="section848012533393"></a>**
 
 - 迁移测试中，会偶发虚拟机磁盘镜像损坏问题。迁移成功后，使用虚拟机的过程中，将出现类似如下内容的报错信息。
 
-    ![](figures/zh-cn_image_0000002518411514.png)
+    ![虚拟机磁盘镜像损坏时在虚拟机内出现的系统报错信息回显](figures/zh-cn_image_0000002518411514.png)
 
     可通过以下步骤进行修复。
 
@@ -611,24 +613,30 @@ Wrk作为Nginx客户端压测软件，版本可以任意选择，以4.2.0为例�
 
 - 迁移完成后，虚拟机内部显示CPU频率为源端物理机的频率，无法与目的端物理机保持一致，但根据CPU单核性能测试结果，该问题仅为显示问题，不会影响虚拟机CPU性能。
 
-    ![](figures/zh-cn_image_0000002549771355.png)
+    ![虚拟机内查看CPU频率的界面截图，显示的频率与源端物理机一致](figures/zh-cn_image_0000002549771355.png)
 
 - QEMU编译过程中，可能会出现如下所示的变量未定义错误。
 
-    ![](figures/zh-cn_image_0000002518251604.png)
+    ![QEMU编译过程中变量未定义的报错信息回显](figures/zh-cn_image_0000002518251604.png)
 
     可通过以下步骤进行修复。
 
     1. 编辑报错文件。
 
-        ```shell
+        ```bash
         vim ../crypto/hash-gcrypt.c
         ```
 
     2. 为报错行使用的变量 _i_ 添加定义，保存并退出。
 
-        ```shell
+        ```bash
         for (int i = 0;i < niov; i++)
         ```
 
     3. 重新编译。
+ 
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2025-06-30|第一次正式发布。|

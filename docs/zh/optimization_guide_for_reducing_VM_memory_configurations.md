@@ -1,5 +1,7 @@
 # 虚拟机大页内存减配优化 特性指南
 
+本文档介绍虚拟机大页内存减配优化特性，通过ZRAM模块压缩存储虚拟机冷页内存并结合KAE硬件加速提升压缩效率，适用于在鲲鹏服务器上部署和使用该特性、需在有限物理内存下部署更多虚拟机的用户。
+
 ## 特性描述
 
 ### 简介
@@ -296,7 +298,7 @@ memlink配置参数说明如下：
 |compaction_cpu_low_percent|触发规整的 vCPU 使用率上限（%）。|
 |compaction_poll_cycle_sec|轮询周期（秒）。|
 
-1. 修改memlink配置，修改部分配置项如下，使能大页内存打分。
+1. 修改memlink配置，修改部分配置项如下，启用大页内存打分。
 
     ```bash
     vim /etc/memlinkd.conf
@@ -432,19 +434,19 @@ watch -n 1 "cat /sys/class/uacce/hisi_zip-*/available_instances"
 
 6. 记录压测结果，对比内存不超分情况，在剩余大页数量大于大页总量10%前，压测性能下降小于15%。
 
-7. 观察剩余大页内存数量小于大页总量20%时，是否触发大页内存主动swap回收，以下两种方式都可以观察到，同时注意reclaim工具的日志。
+7. 观察剩余大页内存数量小于大页总量20%时，是否触发大页内存主动swap回收，以下两种方式都可以观察到，同时注意大页内存管理工具的日志。
 
     ```bash
     watch -n 1 "swapon --show"
     ```
 
-    ![image.png](https://raw.gitcode.com/user-images/assets/9882662/85fa1eec-1006-4881-a39b-de41e2a60bdc/image.png 'image.png')
+    ![swapon --show命令回显示例：ZRAM交换分区已启用，显示其容量、已用空间与优先级100](https://raw.gitcode.com/user-images/assets/9882662/85fa1eec-1006-4881-a39b-de41e2a60bdc/image.png 'image.png')
 
     ```bash
     watch -n 1 "cat /proc/meminfo | grep Huge"
     ```
 
-    ![image.png](https://raw.gitcode.com/user-images/assets/9882662/a73c2a2c-7844-4fe0-a0c3-87e71fd0a768/image.png 'image.png')
+    ![cat /proc/meminfo | grep Huge命令回显示例：HugePages总量与空闲页数量，空闲页随主动swap回收而下降](https://raw.gitcode.com/user-images/assets/9882662/a73c2a2c-7844-4fe0-a0c3-87e71fd0a768/image.png 'image.png')
 
 8. 在虚拟机内观测到虚拟机内存占用超过24G后，查看物理机剩余大页数量出现下降至0的情况时，观测虚拟机是否能正常使用；继续压测，虚拟机内部内存占用是否持续上升；此状态下不再保证虚拟机的性能。
 

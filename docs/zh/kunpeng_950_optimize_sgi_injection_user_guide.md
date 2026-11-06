@@ -1,10 +1,12 @@
 # SGI注入亲和性优化 用户指南
 
+本文档介绍鲲鹏950处理器上SGI注入亲和性优化特性的部署与使用，通过在VM首次运行时预计算MPIDR到vCPU索引的压缩映射表，将SGI分发路径从O(n)遍历优化为O(1)直接查找，适用于需要在鲲鹏950处理器上启用该优化特性的用户。
+
 ## 介绍
 
 ### 简介
 
-本文介绍如何在鲲鹏950服务器中部署和使用SGI注入亲和性优化特性。
+本文介绍如何在鲲鹏950处理器中部署和使用SGI注入亲和性优化特性。
 
 在ARM64 KVM虚拟化中，虚拟机通过写ICC_SGI1R_EL1寄存器向目标vCPU发送SGI（Software Generated Interrupt，软件生成中断）。当Guest发送SGI时，KVM需要在宿主机侧根据亲和性信息计算目标MPID，再按照MPID遍历所有vCPU逐一匹配，时间复杂度为O(n)。当vCPU数量较多时，每次SGI投递都需要全量遍历，成为性能瓶颈。
 
@@ -16,9 +18,9 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 | 模块 | 功能 |
 |--|--|
-| MPIDR映射初始化（`kvm_init_mpidr_data`） | 在VM首次运行时，分析所有vCPU的MPIDR亲和性，提取差异位构造压缩映射表，存入`kvm->arch.mpidr_data`。 |
-| 快速查找（`kvm_mpidr_index` / `kvm_mpidr_to_vcpu`） | 利用压缩映射表，将MPIDR亲和性直接转换为vCPU索引，无需遍历。 |
-| SGI分发路径优化（`vgic_v3_dispatch_sgi`） | 重写SGI分发逻辑，将原来的全量遍历改为按目标位图逐个直接查找，并提取`vgic_v3_queue_sgi`辅助函数。 |
+| MPIDR映射初始化（kvm_init_mpidr_data） | 在VM首次运行时，分析所有vCPU的MPIDR亲和性，提取差异位构造压缩映射表，存入kvm->arch.mpidr_data。 |
+| 快速查找（kvm_mpidr_index / kvm_mpidr_to_vcpu） | 利用压缩映射表，将MPIDR亲和性直接转换为vCPU索引，无需遍历。 |
+| SGI分发路径优化（vgic_v3_dispatch_sgi） | 重写SGI分发逻辑，将原来的全量遍历改为按目标位图逐个直接查找，并提取vgic_v3_queue_sgi辅助函数。 |
 
 典型流程如下。
 
@@ -41,8 +43,8 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 | 项目 | 版本或说明                    |
 |--|--------------------------|
-| OS | `openEuler 2403 LTS SP3` |
-| 内核源码基线 | `OLK-6.6 6.6.0-135.0.0`  |
+| OS | openEuler 2403 LTS SP3 |
+| 内核源码基线 | OLK-6.6 6.6.0-135.0.0  |
 
 ## 获取并合入SGI优化补丁
 
@@ -70,7 +72,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
 2. 期望输出。
 
-   ```text
+   ```output
    OLK-6.6
    ```
 
@@ -93,7 +95,7 @@ SGI注入亲和性优化特性由MPIDR映射初始化模块、快速查找模块
 
    期望最新一条提交类似如下。
 
-   ```text
+   ```output
    <newest> KVM: arm64: vgic-v3: Optimize affinity-based SGI injection
    ```
 
@@ -164,7 +166,7 @@ make binrpm-pkg -j$(nproc)
 2. 启动虚拟机。
 
    ```bash
-   virsh start <vm name> --console
+   virsh start <虚拟机名称> --console
    ```
 
 3. 在虚拟机内触发SGI（如通过`ipistat`或内核调度活动），观察SGI投递延迟是否降低。
@@ -175,3 +177,9 @@ make binrpm-pkg -j$(nproc)
 
 * 本特性仅影响KVM宿主机侧的SGI分发路径，不改变Guest可见行为，对Guest操作系统透明。
 * 当GICv4.1硬件IPIv启用时，Guest的SGI由硬件直接处理，不经过KVM软件路径，本优化不会生效。
+
+## 修订记录
+
+|文档版本|发布日期|修改说明|
+|-------|-------|-------|
+|01|2026-06-30|第一次正式发布。|
